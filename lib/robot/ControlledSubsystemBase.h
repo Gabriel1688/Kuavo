@@ -1,0 +1,169 @@
+
+#pragma once
+
+#include "SubsystemBase.h"
+#include "common/FdEvent.h"
+#include "message.h"
+#include "spdlog/spdlog.h"
+#include <array>
+#include <atomic>
+#include <poll.h>
+#include <pthread.h>
+#include <stdexcept>
+#include <string_view>
+#include <chrono>
+#include <thread>
+
+/**
+ * A base class for subsystems with controllers.
+ *
+ * State, Inputs, and Outputs indices should be specified what they represent in
+ * the derived class.
+ *
+ * @tparam States the number of state estimates in the state vector
+ * @tparam Inputs the number of control inputs in the input vector
+ * @tparam Outputs the number of local outputs in the output vector
+ */
+template<int States, int Inputs, int Outputs>
+class ControlledSubsystemBase : public SubsystemBase {
+public:
+    /**
+     * Constructs a ControlledSubsystemBase.
+     *
+     * @param controllerName Name of the controller log file.
+     * @param stateLabels    Labels for states each consisting of its name and
+     *                       unit.
+     * @param inputLabels    Labels for inputs each consisting of its name and
+     *                       unit.
+     * @param outputLabels   Labels for outputs each consisting of its name and
+     *                       unit.
+     */
+    ControlledSubsystemBase() {
+        m_entryThreadRunning = true;
+        if (pthread_create(&thread_id, nullptr, EntryOfThread, this) != 0) {
+            m_entryThreadRunning = false;
+            SPDLOG_ERROR("failed start thread.");
+        }
+    }
+
+    /**
+     * Move constructor.
+     */
+    ControlledSubsystemBase(ControlledSubsystemBase &&) = default;
+
+    /**
+     * Move assignment operator.
+     */
+    ControlledSubsystemBase &operator=(ControlledSubsystemBase &&) = default;
+
+    ~ControlledSubsystemBase() override {
+        bool wasRunning = m_entryThreadRunning.exchange(false);
+        if (wasRunning) {
+            void *res;
+            pthread_join(thread_id, &res);
+        }
+    }
+
+    /**
+     * Enables the control loop.
+     */
+    void enable() {
+        // m_lastTime is reset so that a large time delta isn't generated from
+        // Update() not being called in a while.
+        // m_lastTime = frc::Timer::GetFPGATimestamp() - Constants::kControllerPeriod;
+        m_isEnabled = true;
+    }
+
+    /**
+     * Disables the control loop.
+     */
+    void disable() { m_isEnabled = false; }
+
+    /**
+     * Returns true if the control loop is enabled.
+     */
+    bool isEnabled() const { return m_isEnabled; }
+
+    /**
+     * Returns the most recent timestep.
+     */
+    // units::second_t GetDt() const { return m_dt; }
+
+    /**
+     * Runs periodic observer and controller update.
+     */
+    virtual void controllerPeriodic() = 0;
+
+    virtual void onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) = 0;
+
+    void message(std::shared_ptr<MESSAGE> message, TCallback callback) {
+        using ThisType = typename std::remove_pointer<decltype(this)>::type;
+
+        auto functor = std::make_unique<std::function<void()>>(
+            std::bind(&ThisType::onMessage, this, message, callback));
+        send_queue_.push(std::move(functor));
+    }
+    /**
+     * Computes current timestep's dt.
+     */
+    void updateDt() {
+        //        m_nowBegin = frc::Timer::GetFPGATimestamp();
+        //        m_dt = m_nowBegin - m_lastTime;
+        //
+        //        if (m_dt == 0_s) {
+        //            m_dt = Constants::kControllerPeriod;
+        //            fmt::print(stderr, "ERROR @ t = {}: dt = 0\n", m_nowBegin);
+        //        }
+        //
+        //        // Clamp spikes in scheduling latency
+        //        if (m_dt > 10_ms) {
+        //            m_dt = Constants::kControllerPeriod;
+        //        }
+    }
+
+private:
+    static void *EntryOfThread(void *argv) {
+        ControlledSubsystemBase *base = static_cast<ControlledSubsystemBase *>(argv);
+        base->Run();
+        return nullptr;
+    }
+
+    void Run() {
+        struct pollfd item;
+        item.fd = send_queue_.getFd();
+        item.events = POLLIN;
+        item.revents = 0;
+
+        std::vector<pollfd> poll_items;
+        poll_items.push_back(item);
+
+        while (m_entryThreadRunning) {
+            int rc = poll(&poll_items[0], poll_items.size(), -1);
+            if (rc <= 0) {
+                if (rc < 0 && errno != EINTR) {
+                    SPDLOG_ERROR("ControlledSubsystemBase::Run poll error: {}", strerror(errno));
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            } else {
+                std::vector<pollfd>::const_iterator i;
+                for (i = poll_items.begin(); i != poll_items.end(); ++i) {
+                    if ((*i).revents != 0) {
+                        auto f = send_queue_.pop();
+                        while (f) {
+                            (*f)();
+                            f = send_queue_.pop();
+                        }
+                    }
+                }
+            }
+            pthread_testcancel();
+        }
+    }
+    //units::second_t m_dt = Constants::kControllerPeriod;  //5ms
+    int m_dt = 5;
+    std::atomic<bool> m_isEnabled{false};
+    std::atomic<bool> m_entryThreadRunning{false};
+    pthread_t thread_id;
+    Fifo<std::function<void()>> send_queue_;
+};

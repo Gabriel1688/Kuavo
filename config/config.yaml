@@ -1,0 +1,69 @@
+# Kuavo Robot Configuration
+# Consolidated from config.txt and hardcoded values across the codebase.
+
+# --- MQTT ---
+mqtt:
+  mode: agent
+  client_id: lwsMqttClient
+  username: lwsUser
+  password: mySecretPassword
+  address: 127.0.0.1
+  host: 127.0.0.1
+  port: 1883
+  in_port: 1110
+  out_port: 1150
+  topics:
+    - test/topic0
+    - test/topic1
+
+# --- UDP Network ---
+udp:
+  server_ip: 127.0.0.1
+  base_local_port: 8887       # localPort  = base_local_port  + server_id * 2
+  base_remote_port: 8886      # remotePort = base_remote_port + server_id * 2
+  client_ip:
+    left: 127.0.0.1           # hardware: 192.168.4.101
+    right: 127.0.0.1          # hardware: 192.168.4.103
+
+# --- IMU Interface ---
+imu:
+  server_ip: 127.0.0.1
+  local_port: 8887            # localPort  = base_local_port  + server_id * 2
+  value_mode: float           # float or int
+  base_id: 514
+
+# --- Motor ---
+motor:
+  observer_ip: 127.0.0.1      # m_observer.wantedIP
+  max_can_device: 6            # device_id < 6 -> server 0 (left), >= 6 -> server 1 (right)
+  motors_per_leg: 5
+  types:
+    DM8009:
+      id: 0
+      position_max: 12.5      # rad
+      velocity_max: 45         # rad/s
+      torque_max: 54           # Nm
+    DM10010L:
+      id: 1
+      position_max: 12.5      # rad
+      velocity_max: 25         # rad/s
+      torque_max: 200          # Nm
+
+  legs:
+    left:
+      base_id: 1
+      device_ids: [ 1, 2, 3, 4, 5 ]
+      motor_type: DM8009
+      server_id: 0
+    right:
+      base_id: 6
+      device_ids: [ 6, 7, 8, 9, 10 ]
+      motor_type: DM8009
+      server_id: 1
+
+# --- Logger settings ---
+logger:
+  path: "./logs/kuavo.log"
+  level: debug
+  maxSize: 100 * 1024 * 1024
+  rotation: 3

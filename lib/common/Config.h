@@ -1,0 +1,108 @@
+#pragma once
+
+#include <array>
+#include <string>
+#include <vector>
+
+/**
+ * Singleton that loads config/config.yaml and exposes every value that was
+ * previously hard-coded across the project.
+ *
+ * Call Config::instance() to obtain the (lazily-initialised) singleton.
+ * On the first call it reads config.yaml from the path given by init(),
+ * or falls back to "../config/config.yaml".
+ */
+class Config {
+public:
+    // --- MQTT -----------------------------------------------------------------
+    struct Mqtt {
+        std::string mode;
+        std::string clientId;
+        std::string username;
+        std::string password;
+        std::string address;
+        std::string host;
+        std::string port;
+        int inPort = 0;
+        int outPort = 0;
+        std::vector<std::string> topics;
+    };
+
+    // --- UDP ------------------------------------------------------------------
+    struct Udp {
+        std::string serverIp;
+        int baseLocalPort = 0;
+        int baseRemotePort = 0;
+        std::string clientIpLeft;
+        std::string clientIpRight;
+    };
+
+    enum class ImuType { INT,
+                         FLOAT };
+    // --- UDP ------------------------------------------------------------------
+    struct Imu {
+        std::string serverIp;
+        int localPort = 0;
+        ImuType type = ImuType::FLOAT;
+        int baseId = 0x514;
+    };
+
+    // --- Motor / Leg ----------------------------------------------------------
+    struct MotorType {
+        std::string name;
+        int id = 0;
+        double positionMax = 0;
+        double velocityMax = 0;
+        double torqueMax = 0;
+    };
+
+    struct Leg {
+        std::string name;
+        int baseId = 0;
+        int serverId = 0;
+        std::string motorType;
+        std::vector<int> deviceIds;
+    };
+
+    struct Motor {
+        std::string observerIp;
+        int maxCanDevice = 0;
+        int motorsPerLeg = 0;
+        std::vector<MotorType> types;
+        std::vector<Leg> legs;
+    };
+    struct Logger {
+        std::string path;
+        std::string level;
+        int maxSize = 0;
+        int rotation = 3;
+    };
+
+    // --- Access ---------------------------------------------------------------
+    static Config &instance();
+    static void init(const std::string &yamlPath);
+
+    const Mqtt &mqtt() const { return m_mqtt; }
+    const Udp &udp() const { return m_udp; }
+    const Imu &imu() const { return m_imu; }
+    const Motor &motor() const { return m_motor; }
+    const Logger &logger() const { return m_logger; }
+
+    /** Find a motor-type descriptor by name (e.g. "DM8009"). */
+    const MotorType *findMotorType(const std::string &name) const;
+
+    /** Find a leg descriptor by name (e.g. "left" or "right"). */
+    const Leg *findLeg(const std::string &name) const;
+
+private:
+    Config() = default;
+    void load(const std::string &yamlPath);
+
+    Mqtt m_mqtt;
+    Udp m_udp;
+    Imu m_imu;
+    Motor m_motor;
+    Logger m_logger;
+
+    static std::string s_yamlPath;
+};
