@@ -46,6 +46,7 @@ void Motor::updateState(int status, double q, double dq, double tau, int tmos, i
         m_stateTau = tau;
         m_stateTmos = tmos;
         m_stateTrotor = trotor;
+        m_lastUpdateTime = std::chrono::steady_clock::now();
     }
     notify();
 }
@@ -142,6 +143,7 @@ void Motor::setMitControl(const MITParam &mit_param) {
     {
         std::lock_guard<std::mutex> lock(m_stateMutex);
         m_lastMitParam = mit_param;
+        m_lastSendTime = std::chrono::steady_clock::now();
     }
     uint16_t kp_uint = utility::doubleToUint(mit_param.kp, 0, 500, 12);
     uint16_t kd_uint = utility::doubleToUint(mit_param.kd, 0, 5, 12);

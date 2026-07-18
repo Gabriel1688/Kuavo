@@ -1,6 +1,6 @@
 //#include "Renderer/SimpleViewer.h"
 #include "srDyn/srSpace.h"
-#include "srg/srgGeometryDraw.h"// for User rendering
+//#include "srg/srgGeometryDraw.h"// for User rendering
 
 #include "LieGroup/LieGroup.h"
 #include "Mercury_Dyn_environment.hpp"

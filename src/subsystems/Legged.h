@@ -8,6 +8,8 @@
 #include "robot/ControlledSubsystemBase.h"
 #include "string"
 #include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <vector>
 
 class UdpServer;
@@ -194,6 +196,9 @@ public:
     /** Human-readable subsystem name. */
     std::string getName() const { return baseId == 1 ? "left" : "right"; }
 
+    /** Returns bitmask of responsive motors (bit i = motor i is responsive). */
+    uint32_t getMotorStatusBits() const;
+
 private:
     static const Eigen::Matrix<double, 2, 2> kGlobalR;
 
@@ -230,4 +235,6 @@ private:
     std::atomic<bool> m_isEnabled{false};
     std::atomic<bool> contact{false};
     int baseId = 0;
+    std::chrono::steady_clock::time_point m_lastCheckTime{};
+    std::vector<bool> m_motorResponsive;
 };

@@ -65,5 +65,5 @@ motor:
 logger:
   path: "./logs/kuavo.log"
   level: debug
-  maxSize: 100 * 1024 * 1024
+  maxSize: 104857600
   rotation: 3

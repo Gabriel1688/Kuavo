@@ -38,8 +38,6 @@ void DriverStationModeThread::Run() {
     while (m_keepAlive.load()) {
         wpi::waitForObject(event.getHandle());
 
-        //wpi::waitForObject(event.getHandle(), 0.1, &timedOut);
-
         DriverStation::refreshData();
 
         if (m_userInDisabled) {

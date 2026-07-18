@@ -18,18 +18,28 @@ enum DS_Position { DS_POSITION_1,
                    DS_POSITION_3 };
 
 /*
- * Protocol bytes (from frc_2020.c)
+ * Protocol bytes
+ *
+ * Control code bits match the HAL_ControlWord bitfield layout so that the
+ * receiver can memcpy the wire byte directly into the struct:
+ *   bit 0 = enabled
+ *   bit 1 = autonomous
+ *   bit 2 = test
+ *   bit 3 = eStop
+ *   bit 4 = fmsAttached
+ *   bit 5 = dsAttached
  */
 static const uint8_t cRequestRestartCode = 0x04;
 static const uint8_t cRequestReboot = 0x08;
 static const uint8_t cRequestNormal = 0x00;
 static const uint8_t cTagCommVersion = 0x01;
-static const uint8_t cTeleoperated = 0x00;
-static const uint8_t cTest = 0x01;
-static const uint8_t cAutonomous = 0x02;
-static const uint8_t cEnabled = 0x04;
-static const uint8_t cEmergencyStop = 0x80;
-static const uint8_t cFMSConnected = 0x08;
+static const uint8_t cTeleoperated = 0x00;   /* neither autonomous nor test */
+static const uint8_t cTest = 0x04;           /* HAL_ControlWord bit 2 */
+static const uint8_t cAutonomous = 0x02;     /* HAL_ControlWord bit 1 */
+static const uint8_t cEnabled = 0x01;        /* HAL_ControlWord bit 0 */
+static const uint8_t cEmergencyStop = 0x08;  /* HAL_ControlWord bit 3 */
+static const uint8_t cFMSConnected = 0x10;   /* HAL_ControlWord bit 4 */
+static const uint8_t cDSAttached = 0x20;     /* HAL_ControlWord bit 5 */
 static const uint8_t cTagDate = 0x0f;
 static const uint8_t cTagJoystick = 0x0c;
 static const uint8_t cTagTimezone = 0x10;
@@ -101,9 +111,9 @@ static std::vector<uint8_t> create_robot_packet(void) {
     /* Add packet header */
     data[2] = cTagCommVersion;
 
-    /* Add control code */
+    /* Add control code (matches HAL_ControlWord bitfield layout) */
     {
-        uint8_t code = 0;
+        uint8_t code = cDSAttached;  /* always set – we are the DS */
 
         switch (cfgGetControlMode()) {
         case DS_CONTROL_TEST: code |= cTest; break;
@@ -346,9 +356,9 @@ int main(void) {
     g_joysticks[0].axes[0] = -1.0f; /* full left  */
     g_joysticks[0].axes[1] = 0.0f;  /* center     */
     g_joysticks[0].num_buttons = 4;
-    g_joysticks[0].buttons[0] = 0; /* pressed    */
+    g_joysticks[0].buttons[0] = 0; /* released    */
     g_joysticks[0].buttons[1] = 1;
-    g_joysticks[0].buttons[2] = 0; /* pressed    */
+    g_joysticks[0].buttons[2] = 0; /* released    */
     g_joysticks[0].buttons[3] = 1;
     g_joysticks[0].num_hats = 1;
     g_joysticks[0].hats[0] = 90;

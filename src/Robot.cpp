@@ -16,18 +16,20 @@ using namespace spdlog;
 //https://github.com/bridgedp/hunter_bipedal_control/blob/37310dde100e2e8373fc7c2c02e825c358e6fd2e/legged_hw/include/legged_hw/LeggedHW.h#L32
 //https://github.com/collin80/GEVCU6/blob/DEV/DeviceManager.h
 void Robot::robotInit() {
-    BooleanEvent stopButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(1); }};
-    BooleanEvent startButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(2); }};
+    BooleanEvent startButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(1); }};
+    BooleanEvent stopButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(2); }};
     BooleanEvent rebootButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(3); }};
     BooleanEvent updateStateButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(4); }};
 
-    stopButton.ifHigh([this] {  leftLeg.setEnable(false);    rightLeg.setEnable(false); });
-    startButton.ifHigh([this] {  leftLeg.setEnable(true);    rightLeg.setEnable(true); });
-    rebootButton.ifHigh([this] {  leftLeg.reboot();    rightLeg.reboot(); });
+    //startButton.ifHigh([this] {  leftLeg.setEnable(true);    rightLeg.setEnable(true); });
+    //stopButton.ifHigh([this] {  leftLeg.setEnable(false);    rightLeg.setEnable(false); });
+    startButton.rising().ifHigh([this] {  leftLeg.setEnable(true); });
+    stopButton.rising().ifHigh([this] {  leftLeg.setEnable(false); });
+    //rebootButton.ifHigh([this] {  leftLeg.reboot();    rightLeg.reboot(); });
 
     updateStateButton.ifHigh([this] {
         TCallback callback = [this](std::string &result) { updateStateCallback(result); };
-        leftLeg.updateState(callback);    rightLeg.updateState(callback); });
+        leftLeg.updateState(callback);   /* rightLeg.updateState(callback);*/ });
     //https://github.com/wpilibsuite/allwpilib/blob/7ca35e5678cf32caec6a1a866ca51d0136c4c398/wpilibcExamples/src/main/cpp/examples/EventLoop/cpp/Robot.cpp#L11
 }
 Robot::~Robot() {
@@ -57,7 +59,7 @@ void Robot::robotPeriodic() {
     //m_dataLog.logMotors(rightLeg.getName(), rightLeg.getMotors());
     //m_dataLog.logImu(imu_subsystem.getStates());
 
-    m_robotStatus.collect(leftLeg.getMotors(), rightLeg.getMotors(),
+    m_robotStatus.collect(leftLeg.getMotors(),leftLeg.getMotors(), /*rightLeg.getMotors(),*/
                           imu_subsystem.getStates().data());
     m_robotStatus.publish();
     //https://github.com/frc3512/Robot-2020/blob/b416c202794fb7deea0081beff2f986de7001ed9/src/main/cpp/Robot.cpp#L126

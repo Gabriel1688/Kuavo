@@ -149,7 +149,7 @@ void Config::load(const std::string &yamlPath) {
             if (logger["level"])
                 m_logger.level = logger["level"].as<std::string>();
             if (logger["maxSize"]) {
-                m_logger.maxSize = logger["rotation"].as<int>();
+                m_logger.maxSize = logger["maxSize"].as<int>();
             }
             if (logger["rotation"])
                 m_logger.rotation = logger["rotation"].as<int>();

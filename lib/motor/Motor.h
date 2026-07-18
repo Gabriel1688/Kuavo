@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "DmFrame.h"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -68,6 +69,11 @@ public:
         return m_lastMitParam;
     }
 
+    std::chrono::steady_clock::time_point getLastUpdateTime() const {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        return m_lastUpdateTime;
+    }
+
     // Enable status getters
     bool isEnabled() const { return m_enabled; }
 
@@ -127,6 +133,8 @@ private:
     double m_stateQ, m_stateDq, m_stateTau;
     int m_stateTmos, m_stateTrotor;
     MITParam m_lastMitParam{};
+    std::chrono::steady_clock::time_point m_lastSendTime{};
+    std::chrono::steady_clock::time_point m_lastUpdateTime{};
 
     // Motor feedback parameters  --reserved.
     // https://github.com/dmBots/motor-control-routine/blob/9137a5bdacc295ccd165ef6e7d06e649a517d096/

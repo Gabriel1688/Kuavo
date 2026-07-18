@@ -39,7 +39,8 @@ WPI_EventHandle wpi::createEvent(bool manualReset, bool initialState) {
     }
     std::scoped_lock lock{manager.mutex};
 
-    auto index = manager.eventIds.emplace_back(0);
+    auto index = static_cast<int>(manager.eventIds.size());
+    manager.eventIds.emplace_back(0);
     WPI_EventHandle handle = (kHandleTypeEvent << 24) | (index & 0xffffff);
 
     // configure state data
@@ -92,7 +93,8 @@ WPI_SemaphoreHandle wpi::createSemaphore(int initialCount, int maximumCount) {
     }
     std::scoped_lock lock{manager.mutex};
 
-    auto index = manager.semaphoreIds.emplace_back(maximumCount);
+    auto index = static_cast<int>(manager.semaphoreIds.size());
+    manager.semaphoreIds.emplace_back(maximumCount);
     WPI_EventHandle handle = (kHandleTypeSemaphore << 24) | (index & 0xffffff);
 
     // configure state data

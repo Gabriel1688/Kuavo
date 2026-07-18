@@ -68,7 +68,7 @@ private:
     GenericHID m_joystick{0};
 
     Legged leftLeg{Config::instance().findLeg("left")->baseId};
-    Legged rightLeg{Config::instance().findLeg("right")->baseId};
+    //Legged rightLeg{Config::instance().findLeg("right")->baseId};
     Imu imu_subsystem;
 
     //DataLog m_dataLog{*g_mqttClient_ptr.load()};

@@ -14,6 +14,16 @@ add_executable(
 )
 
 add_executable(
+        DamiaoSimulator
+        DamiaoSimulator.cpp
+)
+target_include_directories(
+        DamiaoSimulator
+        PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../cmake-build-debug/_deps/spdlog-src/include>
+)
+
+add_executable(
         UdpClient
         UdpClient.cpp
 )

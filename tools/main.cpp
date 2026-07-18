@@ -19,26 +19,29 @@ void startCompetition() {
     wpi::Event event{false, false};
     DriverStation::provideRefreshedDataEventHandle(event.getHandle());
     while (!m_exit) {
+        wpi::waitForObject(event.getHandle());
         if (DriverStation::isEnabled()) {
             modeThread.InDisabled(true);
             std::cout << " Robot is Enabled." << std::endl;
-            bool state = joystick.getRawButton(1);
-            if (state == 1) {
-                std::cout << "GenericHID joystick button 1 is pressed." << std::endl;
-            } else {
-                std::cout << "GenericHID joystick button 1 is released." << std::endl;
-            }
-            state = xbox_controller.getAButton();
-            if (state == 1) {
-                std::cout << "XboxController button AB is pressed." << std::endl;
-            } else {
-                std::cout << "XboxController button AB is released." << std::endl;
+
+            while (DriverStation::isEnabled()) {
+                wpi::waitForObject(event.getHandle());
+
+                bool state = joystick.getRawButton(1);
+                if (state) {
+                    std::cout << "GenericHID joystick button 1 is pressed." << std::endl;
+                } else {
+                    std::cout << "GenericHID joystick button 1 is released." << std::endl;
+                }
+                state = xbox_controller.getAButton();
+                if (state) {
+                    std::cout << "XboxController button AB is pressed." << std::endl;
+                } else {
+                    std::cout << "XboxController button AB is released." << std::endl;
+                }
             }
 
             modeThread.InDisabled(false);
-            while (DriverStation::isEnabled()) {
-                wpi::waitForObject(event.getHandle());
-            }
         }
     }
 }

@@ -21,8 +21,9 @@ Legged::Legged(int baseId) : baseId(baseId) {
     for (int idx = baseId; idx < baseId + motorsPerLeg; idx++) {
         motors.emplace_back(std::make_shared<Motor>(MotorType::DM8009, idx));
     }
+    m_motorResponsive.resize(motors.size(), false);
     // Enable all motors
-    SPDLOG_INFO("Enabling Subsystem {}", baseId == 6 ? "Left" : "Right");
+    SPDLOG_INFO("Enabling Subsystem {}", baseId == 1 ? "Left" : "Right");
     for (auto motor : motors) {
         motor->enableMotor();
     }
@@ -49,9 +50,9 @@ void Legged::controllerPeriodic() {
 }
 
 void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
-    SPDLOG_TRACE("[{}] leg received message type = [{}]", baseId == 6 ? "Left" : "Right", message->type);
+    SPDLOG_TRACE("[{}] leg received message type = [{}]", baseId == 1 ? "Left" : "Right", message->type);
     std::string resposne;
-    resposne.append(baseId == 6 ? "Left" : "Right").append(" leg reply to message type =").append(std::to_string(message->sid));
+    resposne.append(baseId == 1 ? "Left" : "Right").append(" leg reply to message type =").append(std::to_string(message->sid));
     callback(resposne);
 }
 
@@ -68,10 +69,11 @@ void Legged::updateState(TCallback &callback) {
     message(msgPtr, callback);
 }
 static int counter = 0;
+static constexpr auto kStaleThreshold = std::chrono::milliseconds{500};
 void Legged::robotPeriodic() {
     //https://github.com/frc3512/Robot-2023/blob/8f8287bd0887d7570b1931c3e101e5cd7c99061f/src/main/java/frc3512/robot/subsystems/Arm.java#L141
     controllerPeriodic();
-    SPDLOG_TRACE("[{}] Leg robotPeriodic is called.", baseId == 6 ? "Left" : "Right");
+    SPDLOG_TRACE("[{}] Leg robotPeriodic is called.", baseId == 1 ? "Left" : "Right");
 
     counter++;
 #if 0
@@ -90,9 +92,23 @@ void Legged::robotPeriodic() {
     }
 #endif
     // Control  motors with position control
-    for (auto motor : motors) {
+    auto now = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < motors.size(); i++) {
+        auto &motor = motors[i];
         motor->setMitControl(MITParam{2, 1, 0, 0, 0});
-        motor->getMotorStatus();
+
+        auto lastUpdate = motor->getLastUpdateTime();
+        bool fresh = lastUpdate > m_lastCheckTime;
+        bool stale = (now - lastUpdate) > kStaleThreshold;
+
+        if (stale && m_motorResponsive[i]) {
+            SPDLOG_WARN("Motor {} unresponsive (no update for >500ms)", motor->getSendId());
+            m_motorResponsive[i] = false;
+        } else if (fresh && !m_motorResponsive[i]) {
+            SPDLOG_INFO("Motor {} online", motor->getSendId());
+            m_motorResponsive[i] = true;
+        }
+
         if (counter % 10 == 0) {
             SPDLOG_INFO("Motor: {}, position : {}", motor->getSendId(), motor->getPosition());
             if (counter == 10000) {
@@ -100,6 +116,7 @@ void Legged::robotPeriodic() {
             }
         }
     }
+    m_lastCheckTime = now;
 #if 0
         // Control arm motors with torque control
         for (auto motor : motors) {
@@ -177,19 +194,40 @@ void Legged::teleopPeriodic() {
 */
 }
 
+uint32_t Legged::getMotorStatusBits() const {
+    uint32_t bits = 0;
+    for (size_t i = 0; i < m_motorResponsive.size(); i++) {
+        if (m_motorResponsive[i])
+            bits |= (1u << i);
+    }
+    return bits;
+}
+
 Legged::~Legged() {
     for (size_t j = 0; j < motors.size(); j++)
         motors[j].reset();
 }
 
 void Legged::reboot() {
-    SPDLOG_TRACE("[{}] Leg is rebooted.", baseId == 6 ? "Left" : "Right");
+    SPDLOG_INFO("[{}] Leg is rebooted.", baseId == 1 ? "Left" : "Right");
     //usleep(50);
 }
 
 void Legged::setEnable(bool _enable) {
-    SPDLOG_TRACE("[{}] Leg  is set to [{}].", baseId == 6 ? "Left" : "Right", _enable ? "Enabled" : "Disabled");
-    _enable ? enable() : disable();
+    if (_enable && !m_isEnabled) {
+        std::for_each(motors.begin(),motors.end(), [](const auto &motor) {
+            motor->enableMotor();
+        } );
+        enable();
+        SPDLOG_INFO("[{}] Leg  is Enabled.", baseId == 1 ? "Left" : "Right");
+    }
+    else if (!_enable && m_isEnabled) {
+        std::for_each(motors.begin(),motors.end(), [](const auto &motor) {
+            motor->disableMotor();
+        });
+        disable();
+        SPDLOG_INFO("[{}] Leg  is Disabled.", baseId == 1 ? "Left" : "Right");
+    }
 }
 
 bool Legged::isEnabled() {
