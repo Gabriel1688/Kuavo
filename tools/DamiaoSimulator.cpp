@@ -45,7 +45,7 @@
 using namespace spdlog;
 using namespace std::chrono_literals;
 void setupLogger() ;
-static constexpr size_t MAX_MOTORS = 6;
+static constexpr size_t MAX_MOTORS = 12;
 static constexpr size_t CAN_FRAME_SIZE = 13;
 
 // ============================================================

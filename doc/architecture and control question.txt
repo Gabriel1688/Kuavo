@@ -1,0 +1,211 @@
+Kuavo Bipedal Robot Controller - Architecture and Control Questions
+====================================================================
+
+DECISIONS MADE
+==============
+
+Control Loop Architecture
+-------------------------
+- Control frequency: Reduced from 1000Hz to 200Hz (to match state estimation rate)
+- State estimation rate: 100Hz (DynaControl)
+- Thread priorities: Leg controller threads > IMU thread
+- Scheduling policy: SCHED_FIFO
+- Priority inheritance: Implemented
+- Shared memory: Agreed as better approach than message queues, but not yet implemented
+
+CAN Bus Failure Handling
+-----------------------
+- Architecture: Two CAN buses (one per leg)
+- Failure detection: Single CAN bus failure triggers immediate emergency stop
+- Detection logic: 2 consecutive missed messages
+- Emergency stop mechanism: GPIO pin to hardware emergency stop system
+- Transition: No intermediate "degraded operation" state
+- Visual/audio indication: LED on robot + sound buzzer
+
+IMU Failure Handling
+--------------------
+- Detection: 2 consecutive missed messages in a row
+- Response: Immediate emergency stop
+
+Motor Overheating
+-----------------
+- Response: Graceful shutdown (not emergency stop)
+- Implementation: To be defined
+
+Computer/System Failure
+-----------------------
+- Response: Emergency stop
+
+OPEN QUESTIONS
+==============
+
+Critical Safety Parameters
+--------------------------
+1. Instability Detection Thresholds (NOT DECIDED YET)
+   - COM height limits
+   - IMU orientation limits (roll/pitch angles)
+   - Foot contact timeout
+   - Velocity limits
+   - Time to impact requirements
+
+2. Precise Timeout Thresholds (UNDEFINED)
+   - "2 consecutive missed messages" - what's the exact timeout in milliseconds?
+   - At 200Hz, messages expected every 5ms
+   - Is timeout = 6ms? 10ms? 15ms?
+   - Need specific timeout value for consistent failure detection
+
+3. Motor Overheating Graceful Shutdown (UNDEFINED)
+   - Temperature threshold for "overheating"
+   - Graceful shutdown sequence
+   - Duration of graceful shutdown process
+   - Risk of thermal damage during shutdown
+   - What if multiple motors overheat simultaneously?
+
+4. Power Supply Voltage Monitoring (NOT ADDRESSED)
+   - Voltage drop detection
+   - Response to voltage fluctuations
+   - Integration with emergency stop system
+
+Performance Validation
+---------------------
+1. Trajectory Tracking Performance
+   - Needs simulation to calculate performance at 200Hz
+   - Tracking error at 200Hz vs 1000Hz
+   - Required trajectory accuracy specifications
+
+2. Controller Frequency Analysis
+   - Claim: Same controllers work at 200Hz without redesign
+   - Need validation of phase margin at 200Hz
+   - Nyquist frequency implications
+   - LQR gain scheduling impact
+
+Recovery and Diagnostics
+------------------------
+1. Recovery Protocol (TO BE DEFINED NEXT WEEK)
+   - Safe shutdown procedure after emergency stop
+   - Diagnostic procedures
+   - Failure cause identification
+   - Restart criteria
+   - Prevention of repeat failures
+
+2. Post-Emergency Stop Procedures
+   - How operators know it's safe to approach robot
+   - Visual/audio indication details
+   - Logging and notification systems
+
+Implementation Gaps
+-------------------
+1. Shared Memory Implementation
+   - Timeline for migration from message queues
+   - Thread-safe read mechanism without locks
+   - Integration with existing subsystem architecture
+
+2. State Estimation Rate Mismatch
+   - 100Hz state estimation vs 200Hz control loop
+   - Prediction/extrapolation implementation timeline
+   - Handling latency between IMU sampling and control output
+
+3. CAN Bus Communication Strategy
+   - Message structure and bandwidth utilization
+   - Asynchronous motor command details
+   - Bandwidth calculations for 200Hz operation
+
+ARCHITECTURAL RECOMMENDATIONS
+=============================
+
+High Priority (Safety-Critical)
+--------------------------------
+1. Define precise timeout thresholds for failure detection
+2. Specify instability detection thresholds
+3. Design graceful shutdown sequence for motor overheating
+4. Implement power supply voltage monitoring
+5. Define recovery protocol
+
+Medium Priority (Performance)
+------------------------------
+1. Simulate trajectory tracking performance at 200Hz
+2. Validate controller frequency assumptions
+3. Implement shared memory architecture
+4. Complete state estimation prediction/extrapolation
+
+Low Priority (Optimization)
+-----------------------------
+1. Optimize CAN bus bandwidth utilization
+2. Improve diagnostic logging
+3. Enhance visual/audio indication systems
+
+TIMELINE CONSIDERATIONS
+======================
+
+Immediate (This Week)
+---------------------
+- Define precise timeout thresholds
+- Specify instability detection thresholds
+- Design motor overheating graceful shutdown
+- Implement power supply voltage monitoring
+
+Next Week
+---------
+- Define recovery protocol
+- Begin trajectory tracking simulation
+- Start shared memory implementation
+
+Future
+------
+- Complete performance validation
+- Implement all architectural improvements
+- Comprehensive testing and validation
+
+RISKS AND CONCERNS
+==================
+
+High Risk
+---------
+1. Undefined instability detection thresholds
+2. Imprecise failure detection timing
+3. Lack of recovery protocol
+4. Motor overheating graceful shutdown not defined
+
+Medium Risk
+-----------
+1. Performance not validated at 200Hz
+2. State estimation rate mismatch (100Hz vs 200Hz)
+3. Message queue architecture still in use
+
+Low Risk
+------
+1. CAN bus bandwidth optimization
+2. Diagnostic logging enhancements
+
+CONTROL THEORY CONSIDATIONS
+===========================
+
+Rate Mismatch Analysis
+-----------------------
+- Current: 100Hz state estimation, 200Hz control loop
+- Issue: 2x rate mismatch requires prediction/extrapolation
+- Risk: State estimation errors compound in high-speed control
+- Alternative: Match rates (200Hz both) or accept lower control frequency
+
+Bipedal Dynamics
+----------------
+- Fast dynamics require fresh state estimates
+- Foot slip can occur in milliseconds
+- Extrapolation for multiple control cycles is risky
+- Balance control requires precise timing
+
+Real-Time Constraints
+---------------------
+- 200Hz = 5ms period
+- Context switch overhead must be measured
+- Priority inversion risks addressed with inheritance
+- Thread priorities defined but need validation
+
+NEXT STEPS
+==========
+
+1. Answer all open questions under "Critical Safety Parameters"
+2. Begin performance validation simulations
+3. Define recovery protocol
+4. Implement shared memory architecture
+5. Complete comprehensive failure mode analysis

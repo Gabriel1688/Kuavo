@@ -12,6 +12,10 @@ add_executable(
         PackageGenerator
         PackageGenerator.cpp
 )
+add_executable(
+        ImuSimulator
+        imuSimulator.cpp
+)
 
 add_executable(
         DamiaoSimulator
@@ -50,4 +54,83 @@ target_link_libraries(
         UdpClient
         PRIVATE
         spdlog
+)
+
+add_executable(
+        test_controller
+        controller.cpp
+        mercury_shm.h
+)
+
+target_link_libraries(
+        test_controller
+        PRIVATE
+        pthread
+        rt
+)
+
+add_executable(
+        test_actuator
+        mercury_shm.h
+        actuator.cpp
+)
+
+target_link_libraries(
+        test_actuator
+        PRIVATE
+        pthread
+        rt
+)
+
+add_executable(
+        test_controller_v1
+        controller_v1.cpp
+        mercury_shm_v1.h
+)
+
+target_link_libraries(
+        test_controller_v1
+        PRIVATE
+        pthread
+        rt
+)
+
+add_executable(
+        test_actuator_v1
+        mercury_shm_v1.h
+        actuator_v1.cpp
+)
+
+target_link_libraries(
+        test_actuator_v1
+        PRIVATE
+        pthread
+        rt
+)
+
+
+add_executable(
+        test_actuator_logger
+        test_actuator_logger.cpp
+        mercury_shm_v2.h
+)
+
+target_link_libraries(
+        test_actuator_logger
+        PRIVATE
+        pthread
+        rt
+)
+
+add_executable(
+        test_subscriber_influxdb
+        mercury_shm_v2.h
+        test_subscriber_influxdb.cpp
+)
+
+target_link_libraries(
+        test_subscriber_influxdb
+        PRIVATE
+        pthread
+        rt
 )
