@@ -249,7 +249,7 @@ static constexpr size_t LOG_RING_CAPACITY = 4096;
 // Per-Source Staging Double Buffers (for shared memory)
 // ============================================================
 
-struct ImuStageData {
+struct alignas(64) ImuStageData {
     double imu_inc[3];
     double imu_ang_vel[3];
     double imu_acc[3];
@@ -257,7 +257,7 @@ struct ImuStageData {
     uint64_t sequence;
 };
 
-struct MotorGroupStageData {
+struct alignas(64) MotorGroupStageData {
     double joint_jpos[MOTORS_PER_GROUP];
     double joint_jvel[MOTORS_PER_GROUP];
     double motor_jpos[MOTORS_PER_GROUP];

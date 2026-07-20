@@ -56,6 +56,7 @@ add_library(framework
         mqtt/Wrapper.cpp
         mqtt/MqttClient.cpp
         imu/ImuReader.cpp
+        composer/Composer.cpp
         utility/Utility.cpp
 )
 set_target_properties(framework PROPERTIES DEBUG_POSTFIX "d")
