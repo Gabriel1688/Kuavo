@@ -105,11 +105,12 @@ private:
 // Global State
 // ============================================================
 static SharedMemoryLayout* g_layout = nullptr;
-static SPSCRingBuffer<LogRecord, LOG_RING_CAPACITY> g_log_ring;
+static SPSCRingBuffer<BatchLogRecord, 256> g_log_ring;  // 256 batches * 20 samples = 5120 samples buffered
 static MqttSendQueue g_mqtt_queue;
 static uint32_t g_robot_id = 1;
 static uint64_t g_records_published = 0;
 static uint64_t g_records_dropped = 0;
+static uint64_t g_samples_published = 0;
 
 // ============================================================
 // LWS MQTT Callback
@@ -117,7 +118,7 @@ static uint64_t g_records_dropped = 0;
 
 struct MqttClientState {
     struct lws* wsi = nullptr;
-    bool connected = false;
+    std::atomic<bool> connected{false};  // Atomic — written by lws thread, read by composer
     const char* broker_host = "localhost";
     int broker_port = 1883;
 };
@@ -131,32 +132,33 @@ static int lws_mqtt_callback(struct lws* wsi, enum lws_callback_reasons reason,
     switch (reason) {
     case LWS_CALLBACK_MQTT_CLIENT_ESTABLISHED:
         lwsl_user("MQTT connected to broker\n");
-        g_mqtt_state.connected = true;
+        g_mqtt_state.connected.store(true, std::memory_order_release);
         g_mqtt_state.wsi = wsi;
         lws_callback_on_writable(wsi);
         break;
 
     case LWS_CALLBACK_MQTT_CLIENT_WRITEABLE: {
         // Drain one message from the send queue per writeable callback
+        // (lws enforces one lws_write per WRITEABLE callback)
         MqttMessage msg;
         if (g_mqtt_queue.pop(msg)) {
-            // Build MQTT PUBLISH
             lws_mqtt_publish_param_t pub;
             memset(&pub, 0, sizeof(pub));
-            pub.topic = msg.topic;
-            pub.topic_len = strlen(msg.topic);
-            pub.payload_len = msg.payload.size();
+            pub.topic = const_cast<char*>(msg.topic);
+            pub.topic_len = static_cast<uint16_t>(strlen(msg.topic));
+            pub.payload = msg.payload.data();
+            pub.payload_len = static_cast<uint32_t>(msg.payload.size());
+            pub.payload_pos = 0;
             pub.qos = static_cast<lws_mqtt_qos_levels_t>(0);  // Fire-and-forget for lowest latency
 
-            if (lws_mqtt_client_send_message(wsi, &pub,
-                    msg.payload.data(), msg.payload.size()) == 0) {
+            if (lws_mqtt_client_send_publish(wsi, &pub,
+                    msg.payload.data(), pub.payload_len, LWS_MQTT_FINAL_PART) >= 0) {
                 g_records_published++;
             }
 
-            // Request another writeable callback if queue not empty
-            if (g_mqtt_queue.size() > 0) {
-                lws_callback_on_writable(wsi);
-            }
+            // Always request another writeable callback — lws will suppress if
+            // the socket is not ready yet
+            lws_callback_on_writable(wsi);
         }
         break;
     }
@@ -167,7 +169,7 @@ static int lws_mqtt_callback(struct lws* wsi, enum lws_callback_reasons reason,
 
     case LWS_CALLBACK_MQTT_CLIENT_CLOSED:
         lwsl_user("MQTT connection closed\n");
-        g_mqtt_state.connected = false;
+        g_mqtt_state.connected.store(false, std::memory_order_release);
         g_mqtt_state.wsi = nullptr;
         break;
 
@@ -179,34 +181,30 @@ static int lws_mqtt_callback(struct lws* wsi, enum lws_callback_reasons reason,
 }
 
 static const struct lws_protocols mqtt_protocols[] = {
-    {"mqtt", lws_mqtt_callback, 0, 4096},
+    {"mqtt", lws_mqtt_callback, 0, 32768},
     LWS_PROTOCOL_LIST_TERM
 };
 
 // ============================================================
-// Helper: Serialize LogRecord to binary payload
+// Helper: Serialize BatchLogRecord to binary payload
+// Layout: BinaryPayloadHeader | sample_count(u32) | pad(u32) | SensorCommandPair[N]
 // ============================================================
 
-static std::vector<uint8_t> serialize_record(const LogRecord& record) {
-    size_t payload_data_size;
-    const void* payload_data_ptr;
-
-    if (record.header.record_type == static_cast<uint8_t>(RecordType::COMMAND)) {
-        payload_data_size = sizeof(Command);
-        payload_data_ptr = &record.data.cmd;
-    } else {
-        payload_data_size = sizeof(SensorData);
-        payload_data_ptr = &record.data.sensor;
-    }
-
-    size_t total = sizeof(BinaryPayloadHeader) + payload_data_size;
+static std::vector<uint8_t> serialize_batch(const BatchLogRecord& batch) {
+    // Only serialize the valid samples, not the full BATCH_SIZE array
+    size_t pairs_size = batch.sample_count * sizeof(SensorCommandPair);
+    size_t total = sizeof(BinaryPayloadHeader) + sizeof(uint32_t) * 2 + pairs_size;
     std::vector<uint8_t> buf(total);
 
-    // Copy header
-    std::memcpy(buf.data(), &record.header, sizeof(BinaryPayloadHeader));
-    // Copy payload
-    std::memcpy(buf.data() + sizeof(BinaryPayloadHeader),
-                payload_data_ptr, payload_data_size);
+    uint8_t* dst = buf.data();
+    std::memcpy(dst, &batch.header, sizeof(BinaryPayloadHeader));
+    dst += sizeof(BinaryPayloadHeader);
+    std::memcpy(dst, &batch.sample_count, sizeof(uint32_t));
+    dst += sizeof(uint32_t);
+    uint32_t pad = 0;
+    std::memcpy(dst, &pad, sizeof(uint32_t));
+    dst += sizeof(uint32_t);
+    std::memcpy(dst, batch.samples, pairs_size);
 
     return buf;
 }
@@ -249,16 +247,18 @@ static void imu_thread_fn() {
     printf("  IMU thread stopped (%lu iterations)\n", seq);
 }
 
-// Thread 2/3: Motor Group Writer (1kHz)
+// Thread 2/3: Motor Group Writer — frequency from SHM control_freq_hz
 static void motor_thread_fn(SourceDoubleBuffer<MotorGroupStageData>* stage,
                              int group_offset, const char* name) {
-    const uint64_t period_ns = 1'000'000; // 1ms = 1kHz
+    uint32_t freq = g_layout->control_freq_hz;
+    if (freq == 0) freq = 1000;  // fallback
+    const uint64_t period_ns = 1'000'000'000ULL / freq;
     uint64_t next_wakeup = get_monotonic_ns();
     uint64_t seq = 0;
     SimMotor motors[MOTORS_PER_GROUP];
 
-    printf("  %s thread started (1kHz, joints %d-%d)\n",
-           name, group_offset, group_offset + MOTORS_PER_GROUP - 1);
+    printf("  %s thread started (%u Hz, joints %d-%d)\n",
+           name, freq, group_offset, group_offset + MOTORS_PER_GROUP - 1);
 
     while (g_running && !g_layout->emergency_stop.load(std::memory_order_acquire)) {
         // Read command from shared memory
@@ -306,13 +306,25 @@ static void motor_thread_fn(SourceDoubleBuffer<MotorGroupStageData>* stage,
     printf("  %s thread stopped (%lu iterations)\n", name, seq);
 }
 
-// Thread 4: Composer (1kHz) — merges 3 sources + pushes to SPSC ring
+// Thread 4: Composer — frequency from SHM, batches N samples, pushes to SPSC ring
 static void composer_thread_fn() {
-    const uint64_t period_ns = 1'000'000;
+    uint32_t freq = g_layout->control_freq_hz;
+    if (freq == 0) freq = 1000;  // fallback
+    const uint64_t period_ns = 1'000'000'000ULL / freq;
     uint64_t next_wakeup = get_monotonic_ns();
     uint64_t seq = 0;
+    uint64_t batch_seq = 0;
 
-    printf("  Composer thread started (1kHz) — also pushes to log ring\n");
+    // Batch accumulator — local to composer thread
+    BatchLogRecord batch{};
+    uint32_t batch_idx = 0;
+
+    // Connect-delay state: wait 20s after MQTT connects before pushing
+    uint64_t connect_seen_ts = 0;
+    bool push_enabled = false;
+
+    printf("  Composer thread started (%u Hz) — batching %zu samples per MQTT message\n",
+           freq, BATCH_SIZE);
 
     while (g_running && !g_layout->emergency_stop.load(std::memory_order_acquire)) {
         SensorData snapshot{};
@@ -356,7 +368,7 @@ static void composer_thread_fn() {
 
         snapshot.compose_timestamp_ns = get_monotonic_ns();
 
-        // Publish to shared memory (double buffer)
+        // Publish to shared memory (double buffer) — always, regardless of MQTT state
         uint32_t wb = 1 - g_layout->composed_write_idx.load(std::memory_order_acquire);
         std::memcpy(&g_layout->composed_buffers[wb], &snapshot, sizeof(SensorData));
         g_layout->composed_write_idx.store(wb, std::memory_order_release);
@@ -367,29 +379,58 @@ static void composer_thread_fn() {
         Command cmd;
         std::memcpy(&cmd, &g_layout->cmd_buffers[crb], sizeof(Command));
 
-        // Push sensor LogRecord to SPSC ring (process-local)
-        LogRecord sensor_rec;
-        sensor_rec.header.magic = PAYLOAD_MAGIC;
-        sensor_rec.header.version = PAYLOAD_VERSION;
-        sensor_rec.header.record_type = static_cast<uint8_t>(RecordType::SENSOR);
-        sensor_rec.header.robot_id = g_robot_id;
-        sensor_rec.header.payload_size = sizeof(SensorData);
-        sensor_rec.header.sequence = seq;
-        sensor_rec.header.timestamp_ns = snapshot.compose_timestamp_ns;
-        sensor_rec.data.sensor = snapshot;
-        if (!g_log_ring.push(sensor_rec)) g_records_dropped++;
+        // Debug: report new controller command sequence
+        static uint64_t s_last_cmd_seq = UINT64_MAX;
+        if (cmd.sequence != s_last_cmd_seq) {
+            s_last_cmd_seq = cmd.sequence;
+            // printf("  [Composer] new command from controller: seq=%lu  ts=%lu  jpos_cmd[0]=%.4f  enabled[0]=%u\n",
+            //        static_cast<unsigned long>(cmd.sequence),
+            //        static_cast<unsigned long>(cmd.timestamp_ns),
+            //        cmd.jpos_cmd[0],
+            //        static_cast<unsigned>(cmd.enabled[0]));
+        }
 
-        // Push command LogRecord
-        LogRecord cmd_rec;
-        cmd_rec.header.magic = PAYLOAD_MAGIC;
-        cmd_rec.header.version = PAYLOAD_VERSION;
-        cmd_rec.header.record_type = static_cast<uint8_t>(RecordType::COMMAND);
-        cmd_rec.header.robot_id = g_robot_id;
-        cmd_rec.header.payload_size = sizeof(Command);
-        cmd_rec.header.sequence = seq;
-        cmd_rec.header.timestamp_ns = cmd.timestamp_ns;
-        cmd_rec.data.cmd = cmd;
-        if (!g_log_ring.push(cmd_rec)) g_records_dropped++;
+        // ---- Connect guard: only accumulate for MQTT when connected ----
+        // Wait 20 seconds after connected becomes true before pushing data,
+        // to let lws_service finish its initial handshake stall
+        if (!push_enabled) {
+            if (g_mqtt_state.connected.load(std::memory_order_acquire)) {
+                if (connect_seen_ts == 0) {
+                    connect_seen_ts = get_monotonic_ns();
+                    printf("  [Composer] MQTT connected, waiting 20s before pushing data...\n");
+                }
+                uint64_t elapsed_ns = get_monotonic_ns() - connect_seen_ts;
+                if (elapsed_ns >= 20'000'000'000ULL) {
+                    push_enabled = true;
+                    printf("  [Composer] 20s elapsed, starting to push data to ring\n");
+                }
+            }
+        }
+
+        if (push_enabled) {
+            // Accumulate sensor+command pair into batch
+            batch.samples[batch_idx].sensor = snapshot;
+            batch.samples[batch_idx].cmd = cmd;
+            batch_idx++;
+
+            // Flush batch when full
+            if (batch_idx >= BATCH_SIZE) {
+                batch.header.magic = PAYLOAD_MAGIC;
+                batch.header.version = PAYLOAD_VERSION;
+                batch.header.record_type = static_cast<uint8_t>(RecordType::SENSOR_BATCH);
+                batch.header.robot_id = g_robot_id;
+                batch.header.payload_size = static_cast<uint32_t>(
+                    sizeof(uint32_t) * 2 + batch_idx * sizeof(SensorCommandPair));
+                batch.header.sequence = batch_seq++;
+                batch.header.timestamp_ns = snapshot.compose_timestamp_ns;
+                batch.sample_count = batch_idx;
+
+                if (!g_log_ring.push(batch))
+                    g_records_dropped++;
+
+                batch_idx = 0;
+            }
+        }
 
         seq++;
         next_wakeup += period_ns;
@@ -403,7 +444,22 @@ static void composer_thread_fn() {
             next_wakeup = now + period_ns;
         }
     }
-    printf("  Composer thread stopped (%lu iterations)\n", seq);
+
+    // Flush any remaining samples in the partial batch
+    if (batch_idx > 0 && push_enabled) {
+        batch.header.magic = PAYLOAD_MAGIC;
+        batch.header.version = PAYLOAD_VERSION;
+        batch.header.record_type = static_cast<uint8_t>(RecordType::SENSOR_BATCH);
+        batch.header.robot_id = g_robot_id;
+        batch.header.payload_size = static_cast<uint32_t>(
+            sizeof(uint32_t) * 2 + batch_idx * sizeof(SensorCommandPair));
+        batch.header.sequence = batch_seq++;
+        batch.header.timestamp_ns = get_monotonic_ns();
+        batch.sample_count = batch_idx;
+        g_log_ring.push(batch);
+    }
+
+    printf("  Composer thread stopped (%lu iterations, %lu batches)\n", seq, batch_seq);
 }
 
 // Thread 5: MQTT Logger — drains SPSC ring via lws event loop
@@ -411,11 +467,13 @@ static void mqtt_logger_thread_fn(const char* broker_host, int broker_port) {
     printf("  MQTT Logger thread started (broker=%s:%d)\n", broker_host, broker_port);
 
     // Create lws context — no TLS
+    // Increase pt_serv_buf_size for batched payloads (~30 KB per batch)
     struct lws_context_creation_info ctx_info;
     memset(&ctx_info, 0, sizeof(ctx_info));
     ctx_info.port = CONTEXT_PORT_NO_LISTEN;
     ctx_info.protocols = mqtt_protocols;
     ctx_info.options = 0;  // No SSL
+    ctx_info.pt_serv_buf_size = 32768;  // 32 KiB (default 4096 is too small for batched payloads)
 
     struct lws_context* ctx = lws_create_context(&ctx_info);
     if (!ctx) {
@@ -440,21 +498,15 @@ static void mqtt_logger_thread_fn(const char* broker_host, int broker_port) {
     lws_mqtt_client_connect_param_t mqtt_conn;
     memset(&mqtt_conn, 0, sizeof(mqtt_conn));
     mqtt_conn.client_id = "mercury_edge_logger";
+    mqtt_conn.client_id_nofree = 1;
     mqtt_conn.keep_alive = 30;
     mqtt_conn.clean_start = 1;
 
     // LWT (Last Will) on robot/status
-    lws_mqtt_publish_param_t will;
-    memset(&will, 0, sizeof(will));
-    will.topic = MQTT_TOPIC_STATUS;
-    will.topic_len = strlen(MQTT_TOPIC_STATUS);
-    will.qos = static_cast<lws_mqtt_qos_levels_t>(1);
-    will.retain = 1;
-    static const char* will_payload = "{\"status\":\"offline\"}";
-    will.payload_len = strlen(will_payload);
-    mqtt_conn.will_param = will;
-    mqtt_conn.will_msg = will_payload;
-    mqtt_conn.will_msg_len = will.payload_len;
+    mqtt_conn.will_param.topic = MQTT_TOPIC_STATUS;
+    mqtt_conn.will_param.message = "{\"status\":\"offline\"}";
+    mqtt_conn.will_param.qos = QOS1;
+    mqtt_conn.will_param.retain = 1;
 
     conn_info.mqtt_cp = &mqtt_conn;
 
@@ -475,18 +527,14 @@ static void mqtt_logger_thread_fn(const char* broker_host, int broker_port) {
         // Drain SPSC ring buffer into MQTT send queue
         uint64_t drain_start = get_monotonic_ns();
         int drained = 0;
-        LogRecord record;
+        BatchLogRecord batch;
 
-        while (drained < 20 && g_log_ring.pop(record)) {
-            const char* topic = (record.header.record_type ==
-                                 static_cast<uint8_t>(RecordType::COMMAND))
-                                ? MQTT_TOPIC_CMD
-                                : MQTT_TOPIC_SENSOR;
-
+        while (drained < 10 && g_log_ring.pop(batch)) {
             MqttMessage mqtt_msg;
-            mqtt_msg.topic = topic;
-            mqtt_msg.payload = serialize_record(record);
+            mqtt_msg.topic = MQTT_TOPIC_SENSOR;
+            mqtt_msg.payload = serialize_batch(batch);
             g_mqtt_queue.push(std::move(mqtt_msg));
+            g_samples_published += batch.sample_count;
             drained++;
         }
 
@@ -499,15 +547,22 @@ static void mqtt_logger_thread_fn(const char* broker_host, int broker_port) {
             }
         }
 
-        // Service the lws event loop (non-blocking, 1ms timeout)
+        // Service the lws event loop
+        // Use timeout=0 (non-blocking poll) to avoid the 30s stall during
+        // MQTT handshake that blocked ring draining
         uint64_t svc_start = get_monotonic_ns();
-        lws_service(ctx, 1);
+        lws_service(ctx, 0);
         publish_stats.record(get_monotonic_ns() - svc_start);
 
+        // Small sleep to avoid busy-looping when idle
+        // (1ms matches the batch production interval at 1kHz)
+        struct timespec ts_sleep = {0, 1'000'000};
+        clock_nanosleep(CLOCK_MONOTONIC, 0, &ts_sleep, nullptr);
+
         // Periodic status
-        if (drain_cycles > 0 && drain_cycles % 5000 == 0) {
-            printf("  [MQTT] published=%lu  dropped=%lu  queue=%zu  ring=%zu\n",
-                   g_records_published, g_records_dropped,
+        if (drain_cycles > 0 && drain_cycles % 500 == 0) {
+            printf("  [MQTT] batches_published=%lu  samples=%lu  batches_dropped=%lu  queue=%zu  ring=%zu\n",
+                   g_records_published, g_samples_published, g_records_dropped,
                    g_mqtt_queue.size(), g_log_ring.size());
         }
     }
@@ -516,8 +571,8 @@ static void mqtt_logger_thread_fn(const char* broker_host, int broker_port) {
     lws_context_destroy(ctx);
 
     printf("\n  MQTT Logger Report:\n");
-    printf("    Records published: %lu\n", g_records_published);
-    printf("    Records dropped:   %lu\n", g_records_dropped);
+    printf("    Batches published: %lu  (samples: %lu)\n", g_records_published, g_samples_published);
+    printf("    Batches dropped:   %lu\n", g_records_dropped);
     drain_stats.print("Ring drain (per batch)");
     publish_stats.print("lws_service (per call)");
 }

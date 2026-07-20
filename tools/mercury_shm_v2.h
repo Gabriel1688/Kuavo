@@ -142,9 +142,10 @@ static constexpr uint16_t PAYLOAD_MAGIC = 0x4D52; // "MR"
 static constexpr uint8_t  PAYLOAD_VERSION = 1;
 
 enum class RecordType : uint8_t {
-    COMMAND = 0x01,
-    SENSOR  = 0x02,
-    STATUS  = 0x03,
+    COMMAND       = 0x01,
+    SENSOR        = 0x02,
+    STATUS        = 0x03,
+    SENSOR_BATCH  = 0x04,  // Batched sensor+command samples
 };
 
 struct BinaryPayloadHeader {
@@ -181,6 +182,25 @@ struct LogRecord {
         Command    cmd;
         SensorData sensor;
     } data;
+};
+
+// ============================================================
+// Batch logging — accumulate N samples into one MQTT message
+// Reduces MQTT publish rate from 2000/s to ~100/s (at BATCH_SIZE=20)
+// ============================================================
+
+static constexpr size_t BATCH_SIZE = 20;
+
+struct SensorCommandPair {
+    SensorData sensor;
+    Command    cmd;
+};
+
+struct BatchLogRecord {
+    BinaryPayloadHeader header;     // record_type = SENSOR_BATCH
+    uint32_t sample_count;          // Actual number of valid pairs (1..BATCH_SIZE)
+    uint32_t _pad;
+    SensorCommandPair samples[BATCH_SIZE];
 };
 
 template<typename T, size_t Capacity>

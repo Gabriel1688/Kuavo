@@ -431,6 +431,7 @@ int main(int argc, char* argv[]) {
     lws_mqtt_client_connect_param_t mqtt_conn;
     memset(&mqtt_conn, 0, sizeof(mqtt_conn));
     mqtt_conn.client_id = "mercury_influx_subscriber";
+    mqtt_conn.client_id_nofree = 1;
     mqtt_conn.keep_alive = 30;
     mqtt_conn.clean_start = 1;
     conn_info.mqtt_cp = &mqtt_conn;
@@ -535,5 +536,5 @@ influx bucket create -n mercury_robot -o myorg -r 7d
     -influx_url http://localhost:8086 \
     -influx_bucket mercury_robot \
     -influx_org myorg \
-    -influx_token <your-influxdb-token>
+    -influx_token my-dev-token
 */

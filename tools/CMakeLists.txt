@@ -95,6 +95,20 @@ target_link_libraries(
         rt
 )
 
+
+add_executable(
+        test_controller_v2
+        controller_v2.cpp
+        mercury_shm_v2.h
+)
+
+target_link_libraries(
+        test_controller_v2
+        PRIVATE
+        pthread
+        rt
+)
+
 add_executable(
         test_actuator_v1
         mercury_shm_v1.h
@@ -120,6 +134,7 @@ target_link_libraries(
         PRIVATE
         pthread
         rt
+        websockets
 )
 
 add_executable(
@@ -133,4 +148,6 @@ target_link_libraries(
         PRIVATE
         pthread
         rt
+        websockets
+        curl
 )
