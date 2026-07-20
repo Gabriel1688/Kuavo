@@ -1,10 +1,24 @@
 #include "TimedRobot.h"
+#include <pthread.h>
+#include <sched.h>
+#include <cerrno>
+#include <cstring>
+#include <spdlog/spdlog.h>
 #include <chrono>
 #include <thread>
 #include <utility>
 
 void TimedRobot::startCompetition() {
     robotInit();
+
+    // Set main robot loop to SCHED_FIFO priority 75 (100 Hz, 10 ms)
+    struct sched_param param{};
+    param.sched_priority = 75;
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
+        SPDLOG_WARN("Main Loop: failed to set SCHED_FIFO/75: {}", strerror(errno));
+    } else {
+        SPDLOG_INFO("Main Loop: SCHED_FIFO priority 75");
+    }
 
     // Loop forever, calling the appropriate mode-dependent function
     while (true) {

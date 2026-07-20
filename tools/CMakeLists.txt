@@ -20,6 +20,7 @@ add_executable(
 add_executable(
         DamiaoSimulator
         DamiaoSimulator.cpp
+        scheduling.cpp
 )
 target_include_directories(
         DamiaoSimulator
@@ -150,4 +151,16 @@ target_link_libraries(
         rt
         websockets
         curl
+)
+
+add_executable(
+        test_scheduling
+        scheduling.cpp
+)
+
+target_link_libraries(
+        test_scheduling
+        PRIVATE
+        pthread
+        rt
 )

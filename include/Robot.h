@@ -55,7 +55,7 @@ public:
      */
     void teleopPeriodic() override;
 
-    Robot() = default;
+    Robot() : TimedRobot(10) {}  // 100 Hz main loop
 
     ~Robot();
 

@@ -9,6 +9,9 @@
 #include <atomic>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
+#include <cerrno>
+#include <cstring>
 #include <stdexcept>
 #include <string_view>
 #include <chrono>
@@ -40,9 +43,26 @@ public:
      */
     ControlledSubsystemBase() {
         m_entryThreadRunning = true;
-        if (pthread_create(&thread_id, nullptr, EntryOfThread, this) != 0) {
+
+        // Configure real-time thread: SCHED_FIFO priority 90, 256 KiB stack
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 256 * 1024);
+        if (pthread_create(&thread_id, &attr, EntryOfThread, this) != 0) {
             m_entryThreadRunning = false;
             SPDLOG_ERROR("failed start thread.");
+        }
+        pthread_attr_destroy(&attr);
+
+        if (m_entryThreadRunning) {
+            struct sched_param param{};
+            param.sched_priority = 90;
+            if (pthread_setschedparam(thread_id, SCHED_FIFO, &param) != 0) {
+                SPDLOG_WARN("Leg thread: failed to set SCHED_FIFO/90: {}",
+                            strerror(errno));
+            } else {
+                SPDLOG_INFO("Leg thread: SCHED_FIFO priority 90");
+            }
         }
     }
 

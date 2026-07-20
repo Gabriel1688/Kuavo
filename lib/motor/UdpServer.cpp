@@ -3,6 +3,8 @@
 #include "spdlog/fmt/ranges.h"
 #include "spdlog/spdlog.h"
 #include <fcntl.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
 
 bool UdpServer::init(const std::string address, uint16_t localPort, uint16_t remotePort) {
@@ -52,8 +54,22 @@ void UdpServer::start() {
     if (init(udpCfg.serverIp, localPort, remotePort) == false) {
         SPDLOG_ERROR("Failed to initialize sockets for UdpServer[{}]", m_serverId);
     } else {
-        if (pthread_create(&m_threadId, nullptr, EntryOfThread, this) != 0) {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 128 * 1024);
+        int rc = pthread_create(&m_threadId, &attr, EntryOfThread, this);
+        pthread_attr_destroy(&attr);
+        if (rc != 0) {
             SPDLOG_ERROR("Failed to initialize thread for UdpServer[{}]", m_serverId);
+        } else {
+            struct sched_param param{};
+            param.sched_priority = 88;
+            if (pthread_setschedparam(m_threadId, SCHED_FIFO, &param) != 0) {
+                SPDLOG_WARN("UdpServer[{}]: failed to set SCHED_FIFO/88: {}",
+                            m_serverId, strerror(errno));
+            } else {
+                SPDLOG_INFO("UdpServer[{}]: SCHED_FIFO priority 88", m_serverId);
+            }
         }
     }
 }

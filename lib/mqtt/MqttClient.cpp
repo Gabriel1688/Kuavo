@@ -5,9 +5,13 @@
 #include "spdlog/fmt/ranges.h"
 #include "spdlog/spdlog.h"
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <functional>
+#include <pthread.h>
+#include <sched.h>
 #include <thread>
 
 using namespace std::placeholders;
@@ -65,9 +69,22 @@ void MqttClient::loadConfig(const std::string &fileName) {
 }
 
 void MqttClient::start() {
-    m_thrCreated = (pthread_create(&m_thrId, nullptr, EntryOfThread, this) == 0);
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 512 * 1024);
+    m_thrCreated = (pthread_create(&m_thrId, &attr, EntryOfThread, this) == 0);
+    pthread_attr_destroy(&attr);
     if (!m_thrCreated) {
         SPDLOG_ERROR("Failed to create thread for mqtt Client.");
+    } else {
+        struct sched_param param{};
+        param.sched_priority = 0;
+        if (pthread_setschedparam(m_thrId, SCHED_OTHER, &param) != 0) {
+            SPDLOG_WARN("MQTT Logger: failed to set SCHED_OTHER/0: {}",
+                        strerror(errno));
+        } else {
+            SPDLOG_INFO("MQTT Logger: SCHED_OTHER priority 0");
+        }
     }
 }
 

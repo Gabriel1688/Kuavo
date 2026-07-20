@@ -7,6 +7,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -42,9 +44,24 @@ void ImuReader::start() {
                 m_baseId, m_numFrames, m_serverIp, m_localPort);
 
     m_shutdown = false;
-    m_threadCreated = (pthread_create(&m_threadId, nullptr, threadEntry, this) == 0);
+
+    // Configure real-time thread: SCHED_FIFO priority 80, 128 KiB stack
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 128 * 1024);
+    m_threadCreated = (pthread_create(&m_threadId, &attr, threadEntry, this) == 0);
+    pthread_attr_destroy(&attr);
     if (!m_threadCreated) {
         SPDLOG_ERROR("ImuReader: failed to create thread");
+    } else {
+        struct sched_param param{};
+        param.sched_priority = 80;
+        if (pthread_setschedparam(m_threadId, SCHED_FIFO, &param) != 0) {
+            SPDLOG_WARN("ImuReader: failed to set SCHED_FIFO/80: {}",
+                        strerror(errno));
+        } else {
+            SPDLOG_INFO("ImuReader: SCHED_FIFO priority 80");
+        }
     }
 }
 
