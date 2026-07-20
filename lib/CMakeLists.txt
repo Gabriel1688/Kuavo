@@ -51,8 +51,6 @@ add_library(framework
         motor/Motor.cpp
         motor/UdpServer.cpp
 
-        telemetry/DataLog.cpp
-        telemetry/RobotStatus.cpp
         mqtt/Wrapper.cpp
         mqtt/MqttClient.cpp
         imu/ImuReader.cpp

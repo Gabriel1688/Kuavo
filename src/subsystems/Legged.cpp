@@ -68,64 +68,10 @@ void Legged::updateState(TCallback &callback) {
     std::shared_ptr<MESSAGE> msgPtr = std::make_shared<MESSAGE>(msg);
     message(msgPtr, callback);
 }
-static int counter = 0;
-static constexpr auto kStaleThreshold = std::chrono::milliseconds{500};
 void Legged::robotPeriodic() {
-    //https://github.com/frc3512/Robot-2023/blob/8f8287bd0887d7570b1931c3e101e5cd7c99061f/src/main/java/frc3512/robot/subsystems/Arm.java#L141
-    controllerPeriodic();
+    // Lightweight supervisory-only: no motor I/O, no MIT commands.
+    // Motor control (setMitControl, getMotorStatus) moved to controllerPeriodic() at 400Hz.
     SPDLOG_TRACE("[{}] Leg robotPeriodic is called.", baseId == 1 ? "Left" : "Right");
-
-    counter++;
-#if 0
-    // Query motor status
-    for (auto motor : motors) {
-        motor->getMotorStatus();
-        SPDLOG_TRACE("Motor: {}, position : {}", motor->getSendId(), motor->getPosition());
-    }
-
-    // Query motor id
-    for (auto motor : motors) {
-        motor->getRegParam(static_cast<int>(RID::MST_ID));
-        // Access motors through components
-        SPDLOG_TRACE("Motor: {}, MST_ID value : {}", motor->getSendId(),
-                     motor->getParam(static_cast<int>(RID::MST_ID)));
-    }
-#endif
-    // Control  motors with position control
-    auto now = std::chrono::steady_clock::now();
-    for (size_t i = 0; i < motors.size(); i++) {
-        auto &motor = motors[i];
-        motor->setMitControl(MITParam{2, 1, 0, 0, 0});
-
-        auto lastUpdate = motor->getLastUpdateTime();
-        bool fresh = lastUpdate > m_lastCheckTime;
-        bool stale = (now - lastUpdate) > kStaleThreshold;
-
-        if (stale && m_motorResponsive[i]) {
-            SPDLOG_WARN("Motor {} unresponsive (no update for >500ms)", motor->getSendId());
-            m_motorResponsive[i] = false;
-        } else if (fresh && !m_motorResponsive[i]) {
-            SPDLOG_INFO("Motor {} online", motor->getSendId());
-            m_motorResponsive[i] = true;
-        }
-
-        if (counter % 10 == 0) {
-            SPDLOG_INFO("Motor: {}, position : {}", motor->getSendId(), motor->getPosition());
-            if (counter == 10000) {
-                counter = 0;
-            }
-        }
-    }
-    m_lastCheckTime = now;
-#if 0
-        // Control arm motors with torque control
-        for (auto motor : motors) {
-            motor->setMitControl(MITParam{0, 0, 0, 0, 0.1});
-            //usleep(10);
-            motor->getMotorStatus();
-            SPDLOG_INFO("Motor: {}, position : {}", motor->getSendId(), motor->getPosition());
-        }
-#endif
 }
 //TODO:: get reference documents for control command of subsystem via the gamepad?
 void Legged::disabledInit() {

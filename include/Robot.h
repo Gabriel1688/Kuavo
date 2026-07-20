@@ -12,8 +12,6 @@
 #include "spdlog/cfg/env.h"
 #include "spdlog/fmt/ostr.h"
 #include "spdlog/spdlog.h"
-#include "telemetry/DataLog.h"
-#include "telemetry/RobotStatus.h"
 #include <assert.h>
 #include <chrono>
 #include <iostream>
@@ -21,6 +19,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include "../tools/mercury_shm_v2.h"
+#include "composer/Composer.h"
+#include "composer/MotorParamCache.h"
 
 using namespace spdlog;
 
@@ -71,6 +75,17 @@ private:
     //Legged rightLeg{Config::instance().findLeg("right")->baseId};
     Imu imu_subsystem;
 
-    //DataLog m_dataLog{*g_mqttClient_ptr.load()};
-    RobotStatus m_robotStatus{*g_mqttClient_ptr.load()};
+    // Shared memory for health monitoring (lock-free composed buffer)
+    mercury::SharedMemoryLayout* m_shm = nullptr;
+    int m_shm_fd = -1;
+
+    // Composer thread and supporting infrastructure
+    mercury::MotorParamCache m_paramCache;
+    mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::BATCH_RING_CAPACITY> m_logRing;
+    std::unique_ptr<mercury::Composer> m_composer;
+
+    // Supervisory loop state
+    uint64_t m_cycle = 0;
+    uint32_t m_imu_stale_counter = 0;
+
 };

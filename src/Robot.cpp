@@ -3,7 +3,10 @@
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/spdlog.h"
+#include <cerrno>
+#include <cstring>
 #include <memory>
+#include <unistd.h>
 
 using namespace spdlog;
 //TODO::
@@ -16,6 +19,32 @@ using namespace spdlog;
 //https://github.com/bridgedp/hunter_bipedal_control/blob/37310dde100e2e8373fc7c2c02e825c358e6fd2e/legged_hw/include/legged_hw/LeggedHW.h#L32
 //https://github.com/collin80/GEVCU6/blob/DEV/DeviceManager.h
 void Robot::robotInit() {
+    // Attach to POSIX shared memory for health monitoring
+    m_shm_fd = shm_open(mercury::SHM_NAME, O_RDWR, 0666);
+    if (m_shm_fd < 0) {
+        // If SHM doesn't exist yet, create it (first process to start)
+        m_shm_fd = shm_open(mercury::SHM_NAME, O_CREAT | O_RDWR, 0666);
+        if (m_shm_fd < 0) {
+            SPDLOG_ERROR("Failed to open/create SHM {}: {}", mercury::SHM_NAME, strerror(errno));
+        } else {
+            if (ftruncate(m_shm_fd, sizeof(mercury::SharedMemoryLayout)) != 0) {
+                SPDLOG_ERROR("Failed to size SHM: {}", strerror(errno));
+            }
+        }
+    }
+    if (m_shm_fd >= 0) {
+        void* ptr = mmap(nullptr, sizeof(mercury::SharedMemoryLayout),
+                         PROT_READ | PROT_WRITE, MAP_SHARED, m_shm_fd, 0);
+        if (ptr == MAP_FAILED) {
+            SPDLOG_ERROR("Failed to mmap SHM: {}", strerror(errno));
+            close(m_shm_fd);
+            m_shm_fd = -1;
+        } else {
+            m_shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
+            SPDLOG_INFO("Attached to SHM {} ({}B)", mercury::SHM_NAME, sizeof(mercury::SharedMemoryLayout));
+        }
+    }
+
     BooleanEvent startButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(1); }};
     BooleanEvent stopButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(2); }};
     BooleanEvent rebootButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(3); }};
@@ -31,9 +60,37 @@ void Robot::robotInit() {
         TCallback callback = [this](std::string &result) { updateStateCallback(result); };
         leftLeg.updateState(callback);   /* rightLeg.updateState(callback);*/ });
     //https://github.com/wpilibsuite/allwpilib/blob/7ca35e5678cf32caec6a1a866ca51d0136c4c398/wpilibcExamples/src/main/cpp/examples/EventLoop/cpp/Robot.cpp#L11
+
+    // Start Composer thread (reads staging buffers, writes composed SHM + SPSC ring)
+    if (m_shm) {
+        m_composer = std::make_unique<mercury::Composer>(
+            m_shm->imu_stage,
+            m_shm->motor_group_a_stage,
+            m_shm->motor_group_b_stage,
+            m_paramCache,
+            *m_shm,
+            m_logRing);
+        m_composer->start();
+        SPDLOG_INFO("Composer thread started");
+    } else {
+        SPDLOG_WARN("SHM not attached — Composer thread not started");
+    }
 }
 Robot::~Robot() {
-    // Clean up at program exit
+    // Shutdown Composer thread before unmapping SHM
+    if (m_composer) {
+        m_composer->shutdown();
+        m_composer.reset();
+    }
+    // Clean up shared memory mapping
+    if (m_shm) {
+        munmap(m_shm, sizeof(mercury::SharedMemoryLayout));
+        m_shm = nullptr;
+    }
+    if (m_shm_fd >= 0) {
+        close(m_shm_fd);
+        m_shm_fd = -1;
+    }
 }
 
 void Robot::autonomousInit() {
@@ -53,15 +110,62 @@ void Robot::teleopInit() {
  * Periodic code for all modes should go here.
  */
 void Robot::robotPeriodic() {
+    // D4 Task 2: Button event polling
     m_loop.poll();
-    //m_dataLog.logDriverStation();
-    //m_dataLog.logMotors(leftLeg.getName(), leftLeg.getMotors());
-    //m_dataLog.logMotors(rightLeg.getName(), rightLeg.getMotors());
-    //m_dataLog.logImu(imu_subsystem.getStates());
 
-    m_robotStatus.collect(leftLeg.getMotors(),leftLeg.getMotors(), /*rightLeg.getMotors(),*/
-                          imu_subsystem.getStates().data());
-    m_robotStatus.publish();
+    // D4 Tasks 4-5: Health monitoring + safety validation via composed SHM buffer
+    if (m_composer && m_shm) {
+        // D5: Check per-source staleness via Composer bitmask
+        uint8_t stale = m_composer->check_staleness();
+
+        // D5: IMU two-tier staleness
+        if (stale & mercury::Composer::STALE_IMU) {
+            if (m_imu_stale_counter == 0) {
+                SPDLOG_WARN("IMU data stale (>{}ms)", mercury::Composer::IMU_STALE_TIMEOUT_MS);
+            }
+            m_imu_stale_counter++;
+            if (m_imu_stale_counter > 20) {  // 200ms at 100Hz
+                SPDLOG_ERROR("IMU critically stale (>200ms) — emergency stop");
+                m_shm->emergency_stop.store(true, std::memory_order_release);
+            }
+        } else {
+            m_imu_stale_counter = 0;
+        }
+
+        // D5: Motor group staleness -> disable affected leg
+        if (stale & mercury::Composer::STALE_MOTOR_GROUP_A) {
+            SPDLOG_WARN("Motor Group A stale — disabling left leg");
+            leftLeg.setEnable(false);
+        }
+        // Right leg disabled until wired up
+        // if (stale & mercury::Composer::STALE_MOTOR_GROUP_B) {
+        //     SPDLOG_WARN("Motor Group B stale — disabling right leg");
+        //     rightLeg.setEnable(false);
+        // }
+
+        // D5: Mercury Controller heartbeat check
+        uint64_t hb = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
+        if (hb > 0) {
+            uint64_t now_ns = mercury::get_monotonic_ns();
+            if (now_ns - hb > 100'000'000ULL) {  // > 100ms stale
+                SPDLOG_ERROR("Mercury Controller heartbeat stale (>100ms) — emergency stop");
+                m_shm->emergency_stop.store(true, std::memory_order_release);
+            }
+        }
+    }
+
+    // D6: Parameter query round-robin at 10Hz (every 10th cycle)
+    // TODO: Wire to actual CAN 0x7FF query when motor infrastructure supports it
+    // if (m_cycle % 10 == 0) {
+    //     size_t motor_idx = (m_cycle / 10) % 12;
+    //     // send CAN query for motor_idx
+    // }
+
+    // D4 Task 7: Subsystem periodic dispatch (lightweight)
+    SubsystemBase::runAllRobotPeriodic();
+
+    m_cycle++;
+
     //https://github.com/frc3512/Robot-2020/blob/b416c202794fb7deea0081beff2f986de7001ed9/src/main/cpp/Robot.cpp#L126
 }
 
@@ -71,7 +175,6 @@ void Robot::autonomousPeriodic() {
 }
 
 void Robot::teleopPeriodic() {
-    SubsystemBase::runAllRobotPeriodic();
     driveWithJoystick(true);
     // TODO:: Test behavior of mode switch<test->autonomous->teleop->autonomous->test>.
 }

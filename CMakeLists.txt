@@ -50,6 +50,7 @@ target_link_libraries(
         framework
         Mercury_Controller
         dynacore_utils
+        rt
 )
 #add_subdirectory(src/LieGroup)
 add_subdirectory(srSimulator)
