@@ -1,4 +1,5 @@
 #include "Robot.h"
+#include "motor/Motor.h"
 #include "Test1.hpp"
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -43,6 +44,12 @@ void Robot::robotInit() {
             m_shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
             SPDLOG_INFO("Attached to SHM {} ({}B)", mercury::SHM_NAME, sizeof(mercury::SharedMemoryLayout));
         }
+    }
+
+    // Pass SHM and staging buffer pointers to leg subsystems
+    if (m_shm) {
+        leftLeg.setShmPointers(m_shm, &m_shm->motor_group_a_stage);
+        // rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
     }
 
     BooleanEvent startButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(1); }};
@@ -155,11 +162,24 @@ void Robot::robotPeriodic() {
     }
 
     // D6: Parameter query round-robin at 10Hz (every 10th cycle)
-    // TODO: Wire to actual CAN 0x7FF query when motor infrastructure supports it
-    // if (m_cycle % 10 == 0) {
-    //     size_t motor_idx = (m_cycle / 10) % 12;
-    //     // send CAN query for motor_idx
-    // }
+    if (m_cycle % 10 == 0) {
+        size_t motor_idx = (m_cycle / 10) % mercury::NUM_ACT_JOINT;
+        // Route to appropriate leg based on motor index
+        if (motor_idx < mercury::MOTORS_PER_GROUP) {
+            auto& leg_motors = leftLeg.getMotors();
+            if (motor_idx < leg_motors.size()) {
+                leg_motors[motor_idx]->getRegParam(21);  // Query PMAX register
+            }
+        }
+        // Right leg queries (when enabled):
+        // else {
+        //     size_t right_idx = motor_idx - mercury::MOTORS_PER_GROUP;
+        //     auto& leg_motors = rightLeg.getMotors();
+        //     if (right_idx < leg_motors.size()) {
+        //         leg_motors[right_idx]->getRegParam(21);
+        //     }
+        // }
+    }
 
     // D4 Task 7: Subsystem periodic dispatch (lightweight)
     SubsystemBase::runAllRobotPeriodic();

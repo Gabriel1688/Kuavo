@@ -3,7 +3,6 @@
 #include "Eigen/Core"
 #include "Eigen/SparseCore"
 #include "common/TrajectoryConfig.h"
-#include "controllers/Controller.h"
 
 #include "robot/ControlledSubsystemBase.h"
 #include "string"
@@ -12,16 +11,22 @@
 #include <cstdint>
 #include <vector>
 
+// Forward declarations
 class UdpServer;
-
 class Motor;
+
+namespace mercury {
+struct SharedMemoryLayout;
+struct MotorGroupStageData;
+template<typename T> struct SourceDoubleBuffer;
+}  // namespace mercury
 
 /**
  * The Legged subsystem.
  *
  * The Legged uses an unscented Kalman filter for state estimation.
  */
-class Legged : public ControlledSubsystemBase<7, 2, 5> {
+class Legged : public ControlledSubsystemBase<7, 2, 6> {
 public:
     /// The Legged length.  unit <meter>
     static constexpr float kLength = 0.9398;
@@ -37,7 +42,9 @@ public:
      */
     //wpi::static_circular_buffer<Vision::GlobalMeasurement, 8> visionQueue;
 
-    Legged(int baseId);
+    Legged(int baseId,
+           mercury::SharedMemoryLayout* shm = nullptr,
+           mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging = nullptr);
 
     ~Legged();
 
@@ -190,7 +197,7 @@ public:
     /** Read-only access to motors for telemetry. */
     const std::vector<std::shared_ptr<Motor>> &getMotors() const { return motors; }
 
-    /** Base CAN id (1 = left, 6 = right). */
+    /** Base CAN id (1 = left, 7 = right). */
     int getBaseId() const { return baseId; }
 
     /** Human-readable subsystem name. */
@@ -199,13 +206,14 @@ public:
     /** Returns bitmask of responsive motors (bit i = motor i is responsive). */
     uint32_t getMotorStatusBits() const;
 
+    /** Set SHM and staging buffer pointers (called from Robot::robotInit after SHM attach). */
+    void setShmPointers(mercury::SharedMemoryLayout* shm,
+                        mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging);
+
 private:
     static const Eigen::Matrix<double, 2, 2> kGlobalR;
 
     float m_headingOffset = 0.0;
-
-    //TODO:: mapping to the Kuavo  m_controller interface;
-    Eigen::Vector<double, 2> m_u = Eigen::Vector<double, 2>::Zero();
 
     int m_poseMeasurementFaultCounter = 0;
 
@@ -229,12 +237,16 @@ private:
 
     void setCommandMode(uint32_t _mode);
 
-private:
-    Controller m_controller;
     std::vector<std::shared_ptr<Motor>> motors;
     std::atomic<bool> m_isEnabled{false};
     std::atomic<bool> contact{false};
     int baseId = 0;
+    int m_groupOffset = 0;  // Joint index offset: 0 for left, 6 for right
     std::chrono::steady_clock::time_point m_lastCheckTime{};
     std::vector<bool> m_motorResponsive;
+    uint64_t m_paramQueryCycle = 0;  // Round-robin counter for parameter queries
+
+    // Cross-process shared memory pointers (owned by Robot, not by Legged)
+    mercury::SharedMemoryLayout* m_shm = nullptr;
+    mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* m_staging = nullptr;
 };

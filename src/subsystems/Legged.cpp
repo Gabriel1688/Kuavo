@@ -9,10 +9,20 @@
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/spdlog.h"
 #include <unistd.h>
+#include "../tools/mercury_shm_v2.h"
 //TODO:: how to get the contact state from the gamepad?
 //TODO:: refactor the base class of subsystem.
 
-Legged::Legged(int baseId) : baseId(baseId) {
+static constexpr uint64_t COMMAND_STALE_THRESHOLD_NS = 100'000'000ULL;  // 100ms
+static constexpr auto MOTOR_RESPONSIVE_TIMEOUT = std::chrono::milliseconds(100);
+
+Legged::Legged(int baseId,
+               mercury::SharedMemoryLayout* shm,
+               mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging)
+    : baseId(baseId), m_shm(shm), m_staging(staging) {
+    // Compute joint index offset: left leg = 0, right leg = MOTORS_PER_GROUP
+    m_groupOffset = (baseId == 1) ? 0 : mercury::MOTORS_PER_GROUP;
+
     // Reset the pose estimate to the field's bottom-left corner with the turret
     // facing in the target's general direction. This is relatively close to the
     // robot's testing configuration, so the turret won't hit the soft limits.
@@ -34,19 +44,85 @@ void Legged::reset(const Pose2d &initialPose) {
 }
 
 void Legged::controllerPeriodic() {
-    m_controller.getInputs();
-    //TODO:: enrich the message set for each command received from the gamepad.
-    SPDLOG_TRACE("[{}] Leg controllerPeriodic is called.", baseId == 6 ? "Left" : "Right");
-    char data[4] = {1, 2, 3, 4};
-    MESSAGE msg = {0};
-    msg.sid = COM_DS;
-    msg.did = COM_AGENT;
-    msg.length = 4;
-    msg.type = SMM_OutGoingRequest;
-    memcpy(msg.Union.smm_OutGoingRequest.PhoneNumber, data, 4);
+    // 4.2: Null-check SHM pointer
+    if (!m_shm) {
+        SPDLOG_TRACE("[{}] controllerPeriodic: SHM not attached, skipping.", getName());
+        return;
+    }
 
-    std::shared_ptr<MESSAGE> msgPtr = std::make_shared<MESSAGE>(msg);
-    //message(msgPtr, nullptr);
+    // 4.1: Read Mercury_Command from SHM double buffer (lock-free)
+    uint32_t cmd_idx = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+    const mercury::Command& cmd = m_shm->cmd_buffers[cmd_idx];
+
+    // 4.3: Check command freshness
+    uint64_t now_ns = mercury::get_monotonic_ns();
+    if (cmd.timestamp_ns > 0 && (now_ns - cmd.timestamp_ns) > COMMAND_STALE_THRESHOLD_NS) {
+        SPDLOG_WARN("[{}] controllerPeriodic: command stale ({}ms), skipping MIT dispatch.",
+                    getName(), (now_ns - cmd.timestamp_ns) / 1'000'000ULL);
+        return;
+    }
+
+    // 4.4: Check emergency_stop flag
+    if (m_shm->emergency_stop.load(std::memory_order_acquire)) {
+        // Send disable to all motors on emergency stop
+        for (auto& motor : motors) {
+            motor->disableMotor();
+        }
+        SPDLOG_TRACE("[{}] controllerPeriodic: emergency_stop active, motors disabled.", getName());
+        return;
+    }
+
+    // 4.5-4.7: For each motor, extract command and dispatch MIT frame
+    for (size_t i = 0; i < motors.size(); i++) {
+        int j = m_groupOffset + static_cast<int>(i);
+
+        // 4.6: Check enabled field — skip MIT dispatch if not 0xFC
+        if (cmd.enabled[j] != 0xFC) {
+            continue;
+        }
+
+        // 4.5: Extract per-joint command
+        // 4.7: Construct MITParam and call setMitControl
+        MITParam mit;
+        mit.kp  = cmd.kp[j];
+        mit.kd  = cmd.kd[j];
+        mit.q   = cmd.jpos_cmd[j];
+        mit.dq  = cmd.jvel_cmd[j];
+        mit.tau = cmd.jtorque_cmd[j];
+
+        motors[i]->setMitControl(mit);
+    }
+
+    // 4.8: Aggregate motor feedback into MotorGroupStageData
+    // 6.3: Check motor responsiveness (100ms timeout)
+    if (m_staging) {
+        mercury::MotorGroupStageData stageData{};
+        auto now_tp = std::chrono::steady_clock::now();
+
+        for (size_t i = 0; i < motors.size(); i++) {
+            stageData.joint_jpos[i]  = motors[i]->getPosition();
+            stageData.joint_jvel[i]  = motors[i]->getVelocity();
+            stageData.motor_jpos[i]  = motors[i]->getPosition();
+            stageData.motor_jvel[i]  = motors[i]->getVelocity();
+            stageData.jtorque[i]     = motors[i]->getTorque();
+            stageData.mos_temperature[i]   = motors[i]->getStateTmos();
+            stageData.rotor_temperature[i] = motors[i]->getStateTrotor();
+            stageData.motor_status[i] = static_cast<uint8_t>(motors[i]->getState());
+
+            // 6.3: Update motor responsiveness tracking
+            auto lastUpdate = motors[i]->getLastUpdateTime();
+            bool responsive = (now_tp - lastUpdate) < MOTOR_RESPONSIVE_TIMEOUT;
+            if (m_motorResponsive[i] && !responsive) {
+                SPDLOG_WARN("[{}] Motor {} unresponsive (>100ms).", getName(), motors[i]->getSendId());
+            }
+            m_motorResponsive[i] = responsive;
+        }
+
+        // 4.9: Publish to staging buffer with current timestamp
+        stageData.timestamp_ns = now_ns;
+        stageData.sequence = m_shm->composed_sequence.load(std::memory_order_relaxed) + 1;
+        m_staging->publish(stageData);
+    }
 }
 
 void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
@@ -68,10 +144,21 @@ void Legged::updateState(TCallback &callback) {
     std::shared_ptr<MESSAGE> msgPtr = std::make_shared<MESSAGE>(msg);
     message(msgPtr, callback);
 }
+
 void Legged::robotPeriodic() {
-    // Lightweight supervisory-only: no motor I/O, no MIT commands.
+    // 7.1: Lightweight supervisory-only: no motor I/O, no MIT commands.
     // Motor control (setMitControl, getMotorStatus) moved to controllerPeriodic() at 400Hz.
     SPDLOG_TRACE("[{}] Leg robotPeriodic is called.", baseId == 1 ? "Left" : "Right");
+
+    // 7.2-7.3: Parameter query round-robin at 10Hz (every 10th call)
+    if (m_paramQueryCycle % 10 == 0) {
+        size_t motor_idx = (m_paramQueryCycle / 10) % motors.size();
+        if (motor_idx < motors.size()) {
+            // Query bus voltage (RID for voltage varies by motor firmware; using a common one)
+            motors[motor_idx]->getRegParam(21);  // RID 21 = PMAX (example; adjust per Damiao spec)
+        }
+    }
+    m_paramQueryCycle++;
 }
 //TODO:: get reference documents for control command of subsystem via the gamepad?
 void Legged::disabledInit() {
@@ -150,8 +237,11 @@ uint32_t Legged::getMotorStatusBits() const {
 }
 
 Legged::~Legged() {
-    for (size_t j = 0; j < motors.size(); j++)
-        motors[j].reset();
+    // 9.2: Reset all motors on shutdown (setZeroCommand + disableMotor)
+    for (auto& motor : motors) {
+        motor->setZeroCommand();
+        motor->disableMotor();
+    }
 }
 
 void Legged::reboot() {
@@ -178,4 +268,10 @@ void Legged::setEnable(bool _enable) {
 
 bool Legged::isEnabled() {
     return m_isEnabled;
+}
+
+void Legged::setShmPointers(mercury::SharedMemoryLayout* shm,
+                            mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging) {
+    m_shm = shm;
+    m_staging = staging;
 }

@@ -22,6 +22,10 @@
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
               "Binary payload requires little-endian architecture");
 
+// Verify lock-free atomics on target platform
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "std::atomic<uint32_t> must be lock-free for staging buffer correctness");
+
 namespace mercury {
 
 static constexpr int NUM_ACT_JOINT = 12;

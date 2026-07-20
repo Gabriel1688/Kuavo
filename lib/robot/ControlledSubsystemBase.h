@@ -157,15 +157,25 @@ private:
         std::vector<pollfd> poll_items;
         poll_items.push_back(item);
 
+        // Use a high-resolution timer for 2.5ms (400Hz) periodic execution
+        auto next_wake = std::chrono::steady_clock::now();
+        static constexpr auto PERIOD = std::chrono::microseconds(2500);  // 2.5ms = 400Hz
+
         while (m_entryThreadRunning) {
-            int rc = poll(&poll_items[0], poll_items.size(), -1);
-            if (rc <= 0) {
-                if (rc < 0 && errno != EINTR) {
-                    SPDLOG_ERROR("ControlledSubsystemBase::Run poll error: {}", strerror(errno));
-                }
+            // Calculate time until next periodic tick
+            auto now = std::chrono::steady_clock::now();
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_wake - now);
+            int timeout_ms = remaining.count() > 0 ? static_cast<int>(remaining.count()) : 0;
+
+            int rc = poll(&poll_items[0], poll_items.size(), timeout_ms);
+            if (rc < 0 && errno != EINTR) {
+                SPDLOG_ERROR("ControlledSubsystemBase::Run poll error: {}", strerror(errno));
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
-            } else {
+            }
+
+            // Drain any pending messages from the queue
+            if (rc > 0) {
                 std::vector<pollfd>::const_iterator i;
                 for (i = poll_items.begin(); i != poll_items.end(); ++i) {
                     if ((*i).revents != 0) {
@@ -177,6 +187,18 @@ private:
                     }
                 }
             }
+
+            // Execute controllerPeriodic() on schedule
+            now = std::chrono::steady_clock::now();
+            if (now >= next_wake && m_isEnabled) {
+                controllerPeriodic();
+                next_wake += PERIOD;
+                // Catch up if we fell behind (avoid spiral)
+                if (next_wake < now) {
+                    next_wake = now + PERIOD;
+                }
+            }
+
             pthread_testcancel();
         }
     }

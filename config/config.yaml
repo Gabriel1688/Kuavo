@@ -35,8 +35,8 @@ imu:
 # --- Motor ---
 motor:
   observer_ip: 127.0.0.1      # m_observer.wantedIP
-  max_can_device: 6            # device_id < 6 -> server 0 (left), >= 6 -> server 1 (right)
-  motors_per_leg: 5
+  max_can_device: 7            # device_id < 7 -> server 0 (left), >= 7 -> server 1 (right)
+  motors_per_leg: 6
   types:
     DM8009:
       id: 0
@@ -52,12 +52,12 @@ motor:
   legs:
     left:
       base_id: 1
-      device_ids: [ 1, 2, 3, 4, 5 ]
+      device_ids: [ 1, 2, 3, 4, 5, 6 ]
       motor_type: DM8009
       server_id: 0
     right:
-      base_id: 6
-      device_ids: [ 6, 7, 8, 9, 10 ]
+      base_id: 7
+      device_ids: [ 7, 8, 9, 10, 11, 12 ]
       motor_type: DM8009
       server_id: 1
 
