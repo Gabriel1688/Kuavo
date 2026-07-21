@@ -8,10 +8,14 @@ mqtt:
   username: lwsUser
   password: mySecretPassword
   address: 127.0.0.1
+  mqtt_broker: 127.0.0.1
   host: 127.0.0.1
   port: 1883
+  mqtt_port: 1883
   in_port: 1110
   out_port: 1150
+  qos: 0
+  robot_id: 1
   topics:
     - test/topic0
     - test/topic1
@@ -67,3 +71,19 @@ logger:
   level: debug
   maxSize: 104857600
   rotation: 3
+
+data_logger:
+  enabled: true
+  drain_batch_size: 10
+  ring_buffer_capacity: 256
+
+# --- Driver Station ---
+driver_station:
+  udp_port: 61123
+  buttons:
+    1: "enable_left_leg"
+    2: "disable_left_leg"
+    3: "enable_right_leg"
+    4: "disable_right_leg"
+    lb_rb: "enable_all_motors"
+    back_start: "emergency_stop"

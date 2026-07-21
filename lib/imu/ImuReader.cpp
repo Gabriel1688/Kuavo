@@ -19,7 +19,7 @@
 #pragma pack(push, 1)
 struct ImuCanFrame {
     uint8_t header;
-    uint32_t canIdBE;// big-endian
+    uint32_t canIdBE; // big-endian
     uint8_t data[8];
 };
 #pragma pack(pop)
@@ -72,24 +72,6 @@ void ImuReader::shutdown() {
     void *res;
     pthread_join(m_threadId, &res);
     m_threadCreated = false;
-}
-
-void ImuReader::getFloats(float *out) const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::memcpy(out, m_data, sizeof(m_data));
-}
-
-void ImuReader::getDoubles(double *out) const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    for (int i = 0; i < kMaxFloats; ++i)
-        out[i] = static_cast<double>(m_data[i]);
-}
-
-float ImuReader::getFloat(int idx) const {
-    if (idx < 0 || idx >= kMaxFloats)
-        return 0.0f;
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_data[idx];
 }
 
 // ── thread ──────────────────────────────────────────────────────────────────
@@ -149,7 +131,7 @@ void ImuReader::run() {
             ssize_t len = recvfrom(sockfd, &frame, sizeof(frame), 0, nullptr, nullptr);
             if (len < static_cast<ssize_t>(sizeof(frame))) {
                 if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-                    break;// no more data
+                    break; // no more data
                 if (len > 0)
                     SPDLOG_TRACE("ImuReader: short frame ({} bytes)", len);
                 break;
@@ -158,28 +140,64 @@ void ImuReader::run() {
             uint32_t canId = __builtin_bswap32(frame.canIdBE);
 
             // Filter: only accept [baseCanId .. baseCanId + numFrames)
-            if (canId < m_baseId || canId >= m_baseId + static_cast<uint32_t>(m_numFrames))
+            if (canId < static_cast<uint32_t>(m_baseId) ||
+                canId >= static_cast<uint32_t>(m_baseId) + static_cast<uint32_t>(m_numFrames))
                 continue;
 
-            int offset = static_cast<int>(canId - m_baseId);
-            int slot = offset * 2;// 2 floats per frame
+            int offset = static_cast<int>(canId - static_cast<uint32_t>(m_baseId));
 
             // Extract two little-endian float32 values from the 8-byte payload
             float f0, f1;
             std::memcpy(&f0, &frame.data[0], sizeof(float));
             std::memcpy(&f1, &frame.data[4], sizeof(float));
 
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_data[slot] = f0;
-                m_data[slot + 1] = f1;
+            // New measurement cycle starts with the first CAN frame
+            if (offset == 0) {
+                m_frameCount = 0;
             }
 
-            // First frame of a new cycle → bump counter + mark data available
-            if (offset == 0) {
-                std::for_each(m_observers.begin(), m_observers.end(), [this](const auto &observer) { observer.packetHandler(m_data, kMaxFloats); });
+            // Populate the per-cycle accumulator from the first three frames.
+            // Frames 0x514-0x516 carry accelerometer and gyroscope data that
+            // feeds the Composer (and ultimately the Mercury Controller).
+            switch (offset) {
+            case 0:
+                m_accumulator.imu_acc[0] = static_cast<double>(f0);
+                m_accumulator.imu_acc[1] = static_cast<double>(f1);
+                break;
+            case 1:
+                m_accumulator.imu_acc[2] = static_cast<double>(f0);
+                m_accumulator.imu_ang_vel[0] = static_cast<double>(f1);
+                break;
+            case 2:
+                m_accumulator.imu_ang_vel[1] = static_cast<double>(f0);
+                m_accumulator.imu_ang_vel[2] = static_cast<double>(f1);
+                break;
+            default:
+                // Magnetometer, Euler, and quaternion frames are parsed above
+                // for diagnostic purposes but are not copied into ImuStageData;
+                // the Mercury Controller computes orientation from raw sensors.
+                break;
             }
+
+            ++m_frameCount;
             SPDLOG_TRACE("ImuReader: CAN 0x{:03X} offset={} [{:.4f}, {:.4f}]", canId, offset, f0, f1);
+
+            if (m_frameCount == m_numFrames) {
+                m_accumulator.timestamp_ns = mercury::get_monotonic_ns();
+                m_accumulator.sequence = ++m_sequence;
+                constexpr double dt = 1.0 / kRateHz;
+                for (int i = 0; i < 3; ++i) {
+                    m_accumulator.imu_inc[i] = m_accumulator.imu_ang_vel[i] * dt;
+                }
+
+                if (m_stage) {
+                    m_stage->publish(m_accumulator);
+                } else {
+                    SPDLOG_TRACE("ImuReader: staging buffer not set, skipping publish");
+                }
+
+                m_frameCount = 0;
+            }
         }
     }
 

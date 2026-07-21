@@ -25,6 +25,8 @@
 #include "../tools/mercury_shm_v2.h"
 #include "composer/Composer.h"
 #include "composer/MotorParamCache.h"
+#include "logger/Logger.h"
+#include "mqtt/MqttClient.h"
 
 using namespace spdlog;
 
@@ -73,7 +75,7 @@ private:
 
     mercury::MotorParamCache m_paramCache;
     Legged leftLeg{Config::instance().findLeg("left")->baseId, nullptr, nullptr, &m_paramCache};
-    //Legged rightLeg{Config::instance().findLeg("right")->baseId, nullptr, nullptr, &m_paramCache};
+    Legged rightLeg{Config::instance().findLeg("right")->baseId, nullptr, nullptr, &m_paramCache};
     Imu imu_subsystem;
 
     // Shared memory for health monitoring (lock-free composed buffer)
@@ -81,8 +83,10 @@ private:
     int m_shm_fd = -1;
 
     // Composer thread and supporting infrastructure
-    mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::BATCH_RING_CAPACITY> m_logRing;
+    mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::LOG_RING_CAPACITY> m_logRing;
     std::unique_ptr<mercury::Composer> m_composer;
+    std::unique_ptr<mercury::Logger> m_logger;
+    MqttClient m_mqttClient;
 
     // Supervisory loop state
     uint64_t m_cycle = 0;

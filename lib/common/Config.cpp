@@ -48,14 +48,22 @@ void Config::load(const std::string &yamlPath) {
             m_mqtt.password = mq["password"].as<std::string>();
         if (mq["address"])
             m_mqtt.address = mq["address"].as<std::string>();
+        if (mq["mqtt_broker"])
+            m_mqtt.broker = mq["mqtt_broker"].as<std::string>();
         if (mq["host"])
             m_mqtt.host = mq["host"].as<std::string>();
         if (mq["port"])
             m_mqtt.port = mq["port"].as<std::string>();
+        if (mq["mqtt_port"])
+            m_mqtt.mqttPort = mq["mqtt_port"].as<std::string>();
         if (mq["in_port"])
             m_mqtt.inPort = mq["in_port"].as<int>();
         if (mq["out_port"])
             m_mqtt.outPort = mq["out_port"].as<int>();
+        if (mq["qos"])
+            m_mqtt.qos = mq["qos"].as<int>();
+        if (mq["robot_id"])
+            m_mqtt.robotId = mq["robot_id"].as<int>();
         if (mq["topics"]) {
             for (auto it = mq["topics"].begin(); it != mq["topics"].end(); ++it) {
                 m_mqtt.topics.push_back(it->as<std::string>());
@@ -153,6 +161,19 @@ void Config::load(const std::string &yamlPath) {
             }
             if (logger["rotation"])
                 m_logger.rotation = logger["rotation"].as<int>();
+        }
+    }
+
+    // ---- Driver Station ---------------------------------------------------------
+    if (root["driver_station"]) {
+        auto ds = root["driver_station"];
+        if (ds["udp_port"])
+            m_driverStation.udpPort = ds["udp_port"].as<int>();
+        if (ds["buttons"]) {
+            auto buttons = ds["buttons"];
+            for (auto it = buttons.begin(); it != buttons.end(); ++it) {
+                m_driverStation.buttons[it->first.as<std::string>()] = it->second.as<std::string>();
+            }
         }
     }
 

@@ -53,6 +53,7 @@ add_library(framework
 
         mqtt/Wrapper.cpp
         mqtt/MqttClient.cpp
+        logger/Logger.cpp
         imu/ImuReader.cpp
         composer/Composer.cpp
         utility/Utility.cpp

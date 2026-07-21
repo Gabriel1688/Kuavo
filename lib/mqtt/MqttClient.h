@@ -5,10 +5,12 @@
 #include "message.h"
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <string>
 #include <utility>
 #include <vector>
@@ -28,11 +30,11 @@ public:
 	 * This allows the caller to specify a user-defined persistence object,
 	 * or use no persistence.
 	 * @param serverURI the address of the server to connect to, specified
-	 *  				as a URI.
+	 *  				  as a URI.
 	 * @param clientId a client identifier that is unique on the server
-	 *  			   being connected to
+	 * 				   being connected to
 	 * @param persistence The user persistence structure. If this is null,
-	 *  				  then no persistence is used.
+	 * 					then no persistence is used.
 	 */
     MqttClient();
 
@@ -62,8 +64,8 @@ public:
     /**
 	 * Disconnects from the server.
 	 * @param timeoutMS the amount of time in milliseconds to allow for
-	 *  			  existing work to finish before disconnecting. A value
-	 *  			  of zero or less means the client will not quiesce.
+	 *  				  existing work to finish before disconnecting. A value
+	 *  				  of zero or less means the client will not quiesce.
 	 */
 
     /**
@@ -98,29 +100,23 @@ public:
 
     /**
 	 * Determines if this client is currently connected to the server.
-	 * @return @em true if the client is currently connected, @em false if
-	 *  	   not.
+	 * @return @em true if this client is currently connected to the server, @em false if
+	 * 	  	 not.
 	 */
     bool isConnected() const {
         return m_isConnected;
     }
 
     /**
-	 * Publishes a message to a topic on the server and return once it is
-	 * delivered.
-	 * @param top The topic to publish
-	 * @param payload The data to publish
+	 * Publishes an opaque binary payload to a topic on the server.
+	 * @param topic The topic to publish (must remain valid until sent)
+	 * @param data  The binary payload bytes
+	 * @param len   The number of bytes to publish
+	 * @param qos   MQTT QoS level (0, 1, or 2)
+	 * @param retain Whether to publish as a retained message
+	 * @return true if queued successfully, false if the send queue is full
 	 */
-    void publish(std::string &topic, const std::string &payload);
-
-    /**
-	 * Publishes a message to a topic on the server.
-	 * This version will not timeout since that could leave the library with
-	 * a reference to memory that could disappear while the library is still
-	 * using it.
-	 * @param msg The message
-	 */
-    void publish(std::string &topic, const std::shared_ptr<MESSAGE> &message);
+    bool publish_binary(const char *topic, const uint8_t *data, size_t len, int qos, bool retain = false);
 
     void processMessage(void *in, size_t len, struct lws *wsi);
 
@@ -157,6 +153,12 @@ public:
     void asyncResult(std::string &result);
 
     void onClientWriteAble(struct lws *wsi, struct pss *pss);
+    void publishStatusOnline();
+    void publishStatusOffline();
+
+    static constexpr const char *TOPIC_COMMAND_BIN = "robot/command/bin";
+    static constexpr const char *TOPIC_SENSOR_BIN = "robot/sensor/bin";
+    static constexpr const char *TOPIC_STATUS = "robot/status";
 
     bool m_shutdown;
     bool m_thrCreated = false;
@@ -172,26 +174,34 @@ public:
     std::string m_address;
     std::string m_port;
     std::string m_host;
+    int m_qos = 0;
+    int m_robotId = 1;
 
     struct lws_context *m_context;
 
     lws_mqtt_subscribe_param_t m_subParam;
     lws_mqtt_publish_param_t m_pubParam;
 
-    using MqttMessage_ = std::pair<std::string, std::shared_ptr<MESSAGE>>;
-    std::vector<MqttMessage_> m_messages;
+    struct BinaryMessage {
+        const char *topic;
+        std::vector<uint8_t> payload;
+        int qos;
+        bool retain;
+    };
+    std::queue<BinaryMessage> m_binaryMessages;
+    size_t m_highWater = 1000;
+    size_t m_lowWater = 500;
+    std::mutex m_mqttMutex;
+    bool m_highWaterWarning = false;
 
-    using StringMessage_ = std::pair<std::string, std::string>;
-    std::vector<StringMessage_> m_stringMessages;
     /*
         If you want to keep a list of live wsi, 
         you need to use lifecycle callbacks on the protocol in the service 
         thread to manage the list, with your own locking. 
-        Typically you use an ESTABLISHED callback to add ws wsi to your list and 
+        Typically you use ESTABLISHED callback to add ws wsi to your list and 
         a CLOSED callback to remove them.*/
     using wsi_map_type_ = std::map<std::string, struct lws *>;
     wsi_map_type_ m_wsiMap;
     std::mutex m_wsiMapMutex;
-    std::mutex m_mqttMutex;
     void (*m_newDataOccurHandler)(const void *payload, uint32_t payload_len);
 };

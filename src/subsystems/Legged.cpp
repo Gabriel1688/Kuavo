@@ -126,14 +126,34 @@ void Legged::controllerPeriodic() {
 
 void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
     SPDLOG_TRACE("[{}] leg received message type = [{}]", baseId == 1 ? "Left" : "Right", message->type);
-    std::string resposne;
-    resposne.append(baseId == 1 ? "Left" : "Right").append(" leg reply to message type =").append(std::to_string(message->sid));
-    callback(resposne);
+    std::string response;
+    switch (message->type) {
+    case MSG_ENABLE_SUBSYSTEM:
+        SPDLOG_INFO("[{}] Received MSG_ENABLE_SUBSYSTEM", getName());
+        setEnable(true);
+        response = getName() + " leg enabled by subsystem message";
+        break;
+    case MSG_DISABLE_SUBSYSTEM:
+        SPDLOG_INFO("[{}] Received MSG_DISABLE_SUBSYSTEM", getName());
+        setEnable(false);
+        response = getName() + " leg disabled by subsystem message";
+        break;
+    case MSG_EMERGENCY_STOP:
+        SPDLOG_INFO("[{}] Received MSG_EMERGENCY_STOP", getName());
+        setEnable(false);
+        response = getName() + " leg emergency stopped";
+        break;
+    default:
+        response = getName() + " leg reply to message type =" + std::to_string(message->sid);
+        break;
+    }
+
+    callback(response);
 }
 
 void Legged::updateState(TCallback &callback) {
     char data[4] = {1, 2, 3, 4};
-    MESSAGE msg = {0};
+    MESSAGE msg = {};
     msg.sid = COM_DS;
     msg.did = COM_AGENT;
     msg.length = 4;

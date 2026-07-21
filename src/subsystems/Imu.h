@@ -1,29 +1,22 @@
 #pragma once
 
-#include "Eigen/Core"
-#include "Eigen/SparseCore"
 #include "imu/ImuReader.h"
 #include "robot/SubsystemBase.h"
-#include "string"
 #include <atomic>
-#include <vector>
 
 /**
  * The Imu subsystem.
  *
- * Wraps ImuReader (LPMS-IG1 sequential CAN, 32-bit float) and exposes
- * a 7-element state vector:
- *   [eulerX, eulerY, eulerZ, quatW, quatX, quatY, quatZ]
- *
- * eulerX/Y/Z = roll / pitch / yaw in radians
- * quatW/X/Y/Z = orientation quaternion (normalised)
+ * Thin lifecycle wrapper around ImuReader. The ImuReader receives
+ * CAN-over-UDP frames from an LPMS-IG1 IMU and publishes lock-free
+ * snapshots to a SourceDoubleBuffer<ImuStageData>.
  */
 class Imu : public SubsystemBase {
 
 public:
     Imu();
 
-    ~Imu();
+    ~Imu() override;
 
     Imu(const Imu &) = delete;
 
@@ -34,37 +27,15 @@ public:
      */
     void reset();
 
-    /**
-     * Returns the Imu state estimate.
-     * [eulerX, eulerY, eulerZ, quatW, quatX, quatY, quatZ]
-     */
-    const Eigen::Vector<double, 7> &getStates() const;
+    /** Inject the lock-free IMU staging buffer before start(). */
+    void setStagingBuffer(mercury::SourceDoubleBuffer<mercury::ImuStageData> *ptr) {
+        m_reader.setStagingBuffer(ptr);
+    }
 
-    /** Access the underlying CAN reader (for raw float access). */
-    const ImuReader &reader() const { return m_reader; }
-    void update(const float *payload);
-
-private:
-    static const Eigen::Matrix<double, 2, 2> kGlobalR;
-
-    float m_headingOffset = 0.0;
-
-    Eigen::Vector<double, 2> m_u = Eigen::Vector<double, 2>::Zero();
-
-    void init();
-
-    void reboot();
-
-    void setEnable(bool _enable);
-
-    void resting();
-
-    bool isEnabled();
+    /** Start the underlying CAN reader thread. */
+    void start() { m_reader.start(); }
 
 private:
     std::atomic<bool> m_isEnabled{false};
     ImuReader m_reader;
-    mutable Eigen::Vector<double, 7> m_state = Eigen::Vector<double, 7>::Zero();
-    // Data (protected by m_mutex)
-    mutable std::mutex m_mutex;
 };

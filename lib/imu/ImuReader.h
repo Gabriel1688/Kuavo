@@ -1,11 +1,9 @@
 #pragma once
 
-#include "../../../dummy/include/types.h"
+#include "../../tools/mercury_shm_v2.h"
 #include <atomic>
 #include <cstdint>
-#include <mutex>
 #include <string>
-#include <vector>
 
 /**
  * LPMS-IG1 Sequential CAN reader (32-bit float mode).
@@ -13,6 +11,9 @@
  * Spawns a dedicated thread that receives CAN-over-UDP frames from an
  * external CAN bridge, filters by the configured sequential CAN IDs, and
  * extracts two IEEE-754 float32 values per 8-byte CAN payload.
+ *
+ * After all 8 frames of a measurement cycle are received, the aggregated
+ * data is published to a lock-free SourceDoubleBuffer<ImuStageData>.
  *
  * Base CAN ID = startId + (imuId - 1) * 8
  * Value mode = 32-bit floating point
@@ -36,6 +37,8 @@ public:
     static constexpr int kMaxFrames = 8;
     /// Two float32 values per CAN frame.
     static constexpr int kMaxFloats = kMaxFrames * 2;
+    /// IMU update rate in Hz; used for incremental angle integration.
+    static constexpr double kRateHz = 500.0;
 
     // Named indices into the flat float array.
     enum Idx : int {
@@ -50,7 +53,7 @@ public:
         MAG_Z = 8,
         EULER_X = 9,
         EULER_Y = 10,
-        EULER_Z = 11,// roll, pitch, yaw
+        EULER_Z = 11, // roll, pitch, yaw
         QUAT_W = 12,
         QUAT_X = 13,
         QUAT_Y = 14,
@@ -69,20 +72,10 @@ public:
     /// Signal the thread to stop and join it.
     void shutdown();
 
-    void subscribe(const client_observer_t<float> &observer) {
-        m_observers.emplace_back(observer);
-    };
-
-    // ── Thread-safe data access ─────────────────────────────────────────────
-
-    /// Copy the latest 16 floats into @p out (caller provides float[16]).
-    void getFloats(float *out) const;
-
-    /// Copy the latest 16 floats into @p out as doubles.
-    void getDoubles(double *out) const;
-
-    /// Get a single float by index.
-    float getFloat(int idx) const;
+    /// Inject the lock-free staging buffer before start().
+    void setStagingBuffer(mercury::SourceDoubleBuffer<mercury::ImuStageData> *ptr) {
+        m_stage = ptr;
+    }
 
 private:
     void run();
@@ -91,16 +84,19 @@ private:
     std::string m_serverIp;
     int m_localPort{0};
     int m_numFrames{kMaxFrames};
-    //TODO:: ImuType m_imuType{ImuType::LPMS_IG1};
+    // TODO:: ImuType m_imuType{ImuType::LPMS_IG1};
     int m_baseId;
-    std::vector<client_observer_t<float>> m_observers;
 
     // Thread
     pthread_t m_threadId{};
     std::atomic<bool> m_shutdown{false};
     bool m_threadCreated{false};
 
-    // Data (protected by m_mutex)
-    mutable std::mutex m_mutex;
-    float m_data[kMaxFloats]{};
+    // Staging buffer (set before start(), read/written by the reader thread only)
+    mercury::SourceDoubleBuffer<mercury::ImuStageData> *m_stage{nullptr};
+
+    // Per-cycle accumulator (accessed only by the reader thread)
+    int m_frameCount{0};
+    mercury::ImuStageData m_accumulator{};
+    uint64_t m_sequence{0};
 };

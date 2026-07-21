@@ -2,6 +2,7 @@
 
 #include "CANAPI.h"
 #include "Common.h"
+#include "composer/MotorParamCache.h"
 #include <arpa/inet.h>
 #include <atomic>
 #include <errno.h>
@@ -48,6 +49,7 @@ private:
     std::map<int32_t, HAL_CANHandle> m_frameIds;// keep the reply frameId and handle of device.
     std::map<HAL_CANHandle, std::shared_ptr<CANStorage>> *m_canHandles;
     std::map<int, sockaddr_in *> m_deviceIPs;//IP address associate to specific CAN DeviceIds;
+    mercury::MotorParamCache *m_paramCache = nullptr;
 
     void dispatchMessage(const CANFrame &frame, size_t msgSize);
     bool init(const std::string address, uint16_t localPort, uint16_t remotePort);
@@ -98,6 +100,9 @@ public:
     void subscribe(const int32_t deviceId, const client_observer_t<uint8_t> &observer);
     void setCanHandles(std::map<HAL_CANHandle, std::shared_ptr<CANStorage>> *p_canHandles) {
         m_canHandles = p_canHandles;
+    }
+    void setParamCache(mercury::MotorParamCache *p_paramCache) {
+        m_paramCache = p_paramCache;
     }
 
     void unsubscribe(const int32_t deviceId, const client_observer_t<uint8_t> &observer);

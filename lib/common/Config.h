@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -21,10 +22,14 @@ public:
         std::string username;
         std::string password;
         std::string address;
+        std::string broker;
         std::string host;
         std::string port;
+        std::string mqttPort;
         int inPort = 0;
         int outPort = 0;
+        int qos = 0;
+        int robotId = 1;
         std::vector<std::string> topics;
     };
 
@@ -78,6 +83,12 @@ public:
         int rotation = 3;
     };
 
+    // --- Driver Station -------------------------------------------------------
+    struct DriverStation {
+        int udpPort = 61123;
+        std::map<std::string, std::string> buttons;
+    };
+
     // --- Access ---------------------------------------------------------------
     static Config &instance();
     static void init(const std::string &yamlPath);
@@ -87,6 +98,7 @@ public:
     const Imu &imu() const { return m_imu; }
     const Motor &motor() const { return m_motor; }
     const Logger &logger() const { return m_logger; }
+    const DriverStation &driverStation() const { return m_driverStation; }
 
     /** Find a motor-type descriptor by name (e.g. "DM8009"). */
     const MotorType *findMotorType(const std::string &name) const;
@@ -103,6 +115,7 @@ private:
     Imu m_imu;
     Motor m_motor;
     Logger m_logger;
+    DriverStation m_driverStation;
 
     static std::string s_yamlPath;
 };

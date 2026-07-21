@@ -1,5 +1,7 @@
 #include "Robot.h"
+#include "message.h"
 #include "motor/Motor.h"
+#include "motor/UdpServer.h"
 #include "Test1.hpp"
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/sinks/stdout_color_sinks.h"
@@ -19,7 +21,28 @@ using namespace spdlog;
 // Reference: https://github.com/frc3512/Robot-2020/blob/b416c202794fb7deea0081beff2f986de7001ed9/docs/system-architecture.md?plain=1#L120
 //https://github.com/bridgedp/hunter_bipedal_control/blob/37310dde100e2e8373fc7c2c02e825c358e6fd2e/legged_hw/include/legged_hw/LeggedHW.h#L32
 //https://github.com/collin80/GEVCU6/blob/DEV/DeviceManager.h
+
+namespace {
+std::shared_ptr<MESSAGE> makeSubsystemMessage(uint8_t msgType) {
+    MESSAGE m = {};
+    m.sid = COM_DS;
+    m.did = COM_AGENT;
+    m.type = msgType;
+    m.length = 0;
+    return std::make_shared<MESSAGE>(m);
+}
+}  // namespace
+
 void Robot::robotInit() {
+    // Load MQTT config and start the libwebsockets client before anything else.
+    m_mqttClient.loadConfig("");
+    m_mqttClient.start();
+
+    // Wire the shared MotorParamCache into both UdpServer instances
+    // before any parameter queries are dispatched by robotPeriodic().
+    UdpServer::getInstance(0).setParamCache(&m_paramCache);
+    UdpServer::getInstance(1).setParamCache(&m_paramCache);
+
     // Attach to POSIX shared memory for health monitoring
     m_shm_fd = shm_open(mercury::SHM_NAME, O_RDWR, 0666);
     if (m_shm_fd < 0) {
@@ -49,24 +72,83 @@ void Robot::robotInit() {
     // Pass SHM and staging buffer pointers to leg subsystems
     if (m_shm) {
         leftLeg.setShmPointers(m_shm, &m_shm->motor_group_a_stage);
-        // rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
+        rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
     }
 
-    BooleanEvent startButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(1); }};
-    BooleanEvent stopButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(2); }};
-    BooleanEvent rebootButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(3); }};
-    BooleanEvent updateStateButton{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(4); }};
+    // Wire the IMU staging buffer before starting the reader thread
+    if (m_shm) {
+        imu_subsystem.setStagingBuffer(&m_shm->imu_stage);
+    }
+    imu_subsystem.start();
 
-    //startButton.ifHigh([this] {  leftLeg.setEnable(true);    rightLeg.setEnable(true); });
-    //stopButton.ifHigh([this] {  leftLeg.setEnable(false);    rightLeg.setEnable(false); });
-    startButton.rising().ifHigh([this] {  leftLeg.setEnable(true); });
-    stopButton.rising().ifHigh([this] {  leftLeg.setEnable(false); });
-    //rebootButton.ifHigh([this] {  leftLeg.reboot();    rightLeg.reboot(); });
+    // Helper no-op callback for async subsystem messages
+    TCallback noop = [](std::string &) {};
 
-    updateStateButton.ifHigh([this] {
-        TCallback callback = [this](std::string &result) { updateStateCallback(result); };
-        leftLeg.updateState(callback);   /* rightLeg.updateState(callback);*/ });
-    //https://github.com/wpilibsuite/allwpilib/blob/7ca35e5678cf32caec6a1a866ca51d0136c4c398/wpilibcExamples/src/main/cpp/examples/EventLoop/cpp/Robot.cpp#L11
+    const auto &dsButtons = Config::instance().driverStation().buttons;
+    SPDLOG_INFO("DriverStation button mapping loaded:");
+    for (const auto &kv : dsButtons) {
+        SPDLOG_INFO("  button {} -> {}", kv.first, kv.second);
+    }
+
+    // Resolve button numbers from config (default to design mapping if missing)
+    auto buttonNumber = [&dsButtons](const std::string &action) -> int {
+        for (const auto &kv : dsButtons) {
+            if (kv.second == action) {
+                try {
+                    return std::stoi(kv.first);
+                } catch (...) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
+    };
+
+    int btnEnableLeft = buttonNumber("enable_left_leg");
+    int btnDisableLeft = buttonNumber("disable_left_leg");
+    int btnEnableRight = buttonNumber("enable_right_leg");
+    int btnDisableRight = buttonNumber("disable_right_leg");
+    if (btnEnableLeft <= 0) btnEnableLeft = 1;
+    if (btnDisableLeft <= 0) btnDisableLeft = 2;
+    if (btnEnableRight <= 0) btnEnableRight = 3;
+    if (btnDisableRight <= 0) btnDisableRight = 4;
+
+    // Per-button BooleanEvent objects for the four main face buttons
+    auto rawButton = [&](int number) -> std::function<bool()> {
+        return [&joystick = m_joystick, number] { return joystick.getRawButton(number); };
+    };
+
+    BooleanEvent enableLeftButton{&m_loop, rawButton(btnEnableLeft)};
+    BooleanEvent disableLeftButton{&m_loop, rawButton(btnDisableLeft)};
+    BooleanEvent enableRightButton{&m_loop, rawButton(btnEnableRight)};
+    BooleanEvent disableRightButton{&m_loop, rawButton(btnDisableRight)};
+
+    enableLeftButton.rising().ifHigh([this, noop] { leftLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), noop); });
+    disableLeftButton.rising().ifHigh([this, noop] { leftLeg.message(makeSubsystemMessage(MSG_DISABLE_SUBSYSTEM), noop); });
+    enableRightButton.rising().ifHigh([this, noop] { rightLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), noop); });
+    disableRightButton.rising().ifHigh([this, noop] { rightLeg.message(makeSubsystemMessage(MSG_DISABLE_SUBSYSTEM), noop); });
+
+    // LB (5) + RB (6) -> enable both legs
+    BooleanEvent lb{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(5); }};
+    BooleanEvent rb{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(6); }};
+    auto enableAll = lb && [&rb] { return rb.getAsBoolean(); };
+    enableAll.rising().ifHigh([this, noop] {
+        leftLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), noop);
+        rightLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), noop);
+    });
+
+    // Back (7) + Start (8) -> emergency stop: set SHM flag and disable both legs
+    BooleanEvent back{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(7); }};
+    BooleanEvent start{&m_loop, [&joystick = m_joystick] { return joystick.getRawButton(8); }};
+    auto emergency = back && [&start] { return start.getAsBoolean(); };
+    emergency.rising().ifHigh([this, noop] {
+        if (m_shm) {
+            m_shm->emergency_stop.store(true, std::memory_order_release);
+        }
+        leftLeg.message(makeSubsystemMessage(MSG_EMERGENCY_STOP), noop);
+        rightLeg.message(makeSubsystemMessage(MSG_EMERGENCY_STOP), noop);
+        SPDLOG_ERROR("EMERGENCY STOP activated by operator");
+    });
 
     // Start Composer thread (reads staging buffers, writes composed SHM + SPSC ring)
     if (m_shm) {
@@ -79,16 +161,32 @@ void Robot::robotInit() {
             m_logRing);
         m_composer->start();
         SPDLOG_INFO("Composer thread started");
+
+        // Start Logger drain thread after Composer
+        m_logger = std::make_unique<mercury::Logger>(m_logRing, m_mqttClient,
+                                                   static_cast<uint32_t>(Config::instance().mqtt().robotId));
+        m_logger->start();
+        SPDLOG_INFO("Logger thread started");
     } else {
-        SPDLOG_WARN("SHM not attached — Composer thread not started");
+        SPDLOG_WARN("SHM not attached — Composer and Logger threads not started");
     }
 }
 Robot::~Robot() {
+    // Shutdown Logger thread before Composer to stop publishing
+    if (m_logger) {
+        m_logger->shutdown();
+        m_logger.reset();
+    }
+
     // Shutdown Composer thread before unmapping SHM
     if (m_composer) {
         m_composer->shutdown();
         m_composer.reset();
     }
+
+    // Stop the MQTT client
+    m_mqttClient.shutdown();
+
     // Clean up shared memory mapping
     if (m_shm) {
         munmap(m_shm, sizeof(mercury::SharedMemoryLayout));
@@ -101,7 +199,9 @@ Robot::~Robot() {
 }
 
 void Robot::autonomousInit() {
-    //TODO:: consider what need to be done here.
+    // D4: Enable both legs on mode entry
+    leftLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), [](std::string &) {});
+    rightLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), [](std::string &) {});
     SubsystemBase::runAllAutonomousInit();
 }
 
@@ -109,7 +209,9 @@ void Robot::autonomousInit() {
  * Initialization code for teleop mode should go here.
  */
 void Robot::teleopInit() {
-    //TODO:: consider what need to be done here.
+    // D4: Enable both legs on mode entry
+    leftLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), [](std::string &) {});
+    rightLeg.message(makeSubsystemMessage(MSG_ENABLE_SUBSYSTEM), [](std::string &) {});
     SubsystemBase::runAllTeleopInit();
 }
 
@@ -144,11 +246,10 @@ void Robot::robotPeriodic() {
             SPDLOG_WARN("Motor Group A stale — disabling left leg");
             leftLeg.setEnable(false);
         }
-        // Right leg disabled until wired up
-        // if (stale & mercury::Composer::STALE_MOTOR_GROUP_B) {
-        //     SPDLOG_WARN("Motor Group B stale — disabling right leg");
-        //     rightLeg.setEnable(false);
-        // }
+        if (stale & mercury::Composer::STALE_MOTOR_GROUP_B) {
+            SPDLOG_WARN("Motor Group B stale — disabling right leg");
+            rightLeg.setEnable(false);
+        }
 
         // D5: Mercury Controller heartbeat check
         uint64_t hb = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
@@ -170,15 +271,13 @@ void Robot::robotPeriodic() {
             if (motor_idx < leg_motors.size()) {
                 leg_motors[motor_idx]->getRegParam(21);  // Query PMAX register
             }
+        } else {
+            size_t right_idx = motor_idx - mercury::MOTORS_PER_GROUP;
+            auto& leg_motors = rightLeg.getMotors();
+            if (right_idx < leg_motors.size()) {
+                leg_motors[right_idx]->getRegParam(21);
+            }
         }
-        // Right leg queries (when enabled):
-        // else {
-        //     size_t right_idx = motor_idx - mercury::MOTORS_PER_GROUP;
-        //     auto& leg_motors = rightLeg.getMotors();
-        //     if (right_idx < leg_motors.size()) {
-        //         leg_motors[right_idx]->getRegParam(21);
-        //     }
-        // }
     }
 
     // D4 Task 7: Subsystem periodic dispatch (lightweight)

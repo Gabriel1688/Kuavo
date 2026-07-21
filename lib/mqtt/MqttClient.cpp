@@ -7,12 +7,16 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <pthread.h>
+#include <queue>
 #include <sched.h>
+#include <sys/resource.h>
 #include <thread>
+#include <vector>
 
 using namespace std::placeholders;
 
@@ -56,16 +60,18 @@ void MqttClient::loadConfig(const std::string &fileName) {
     m_clientId = mqtt.clientId;
     m_username = mqtt.username;
     m_password = mqtt.password;
-    m_address = mqtt.address;
+    m_address = mqtt.broker.empty() ? mqtt.address : mqtt.broker;
     m_host = mqtt.host;
-    m_port = mqtt.port;
+    m_port = mqtt.mqttPort.empty() ? mqtt.port : mqtt.mqttPort;
+    m_qos = mqtt.qos;
+    m_robotId = mqtt.robotId;
     m_topics = mqtt.topics;
 
     for (const auto &topic : m_topics) {
         SPDLOG_INFO("topic:[{}]", topic);
     }
-    SPDLOG_INFO("[{}]:[{}]:[{}]:[{}]:[{}].",
-                m_clientId, m_username, m_password, m_address, m_host);
+    SPDLOG_INFO("[{}]:[{}]:[{}]:[{}]:[{}]:[{}]:[{}].",
+                m_clientId, m_username, m_password, m_address, m_host, m_port, m_robotId);
 }
 
 void MqttClient::start() {
@@ -89,6 +95,8 @@ void MqttClient::start() {
 }
 
 void MqttClient::shutdown() {
+    // Best-effort LWT overwrite before tearing down the lws thread.
+    publishStatusOffline();
     m_shutdown = true;
     if (!m_thrCreated) {
         return;
@@ -110,6 +118,13 @@ void *MqttClient::EntryOfThread(void *arg) {
 }
 
 void MqttClient::run() {
+    // MQTT Logger runs at SCHED_OTHER with nice +10 to yield to real-time threads.
+    if (setpriority(PRIO_PROCESS, 0, 10) != 0) {
+        SPDLOG_WARN("MQTT Logger: failed to set nice +10: {}", strerror(errno));
+    } else {
+        SPDLOG_INFO("MQTT Logger: nice +10 applied");
+    }
+
     const struct lws_protocols protocols[] = {
         {.name = "mqtt",
          .callback = &callbackEx,
@@ -153,6 +168,10 @@ void MqttClient::run() {
 }
 
 int MqttClient::connect(struct lws_context *pcontext) {
+    static const char *statusTopic = TOPIC_STATUS;
+    static const char *offlinePayload = "offline";
+    static const char *onlinePayload = "online";
+
     lws_mqtt_client_connect_param_t client_connect_param = {
         .client_id = m_clientId.c_str(),
         .keep_alive = 60,
@@ -161,10 +180,16 @@ int MqttClient::connect(struct lws_context *pcontext) {
         .username_nofree = 1,
         .password_nofree = 1,
         .will_param = {
-            .topic = "good/bye",
-            .message = "sign-off",
-            .qos = static_cast<lws_mqtt_qos_levels_t>(0),
-            .retain = 0,
+            .topic = statusTopic,
+            .message = offlinePayload,
+            .qos = QOS1,
+            .retain = 1,
+        },
+        .birth_param = {
+            .topic = statusTopic,
+            .message = onlinePayload,
+            .qos = QOS1,
+            .retain = 1,
         },
         .username = m_username.c_str(),
         .password = m_password.c_str(),
@@ -182,6 +207,7 @@ int MqttClient::connect(struct lws_context *pcontext) {
     info.method = "MQTT";
     info.alpn = "mqtt";
     info.port = atoi(m_port.c_str());
+    info.ssl_connection = 0;
 
     SPDLOG_INFO("connection [{}]:[{}]:[{}]:[{}]:[{}]",
                 client_connect_param.client_id,
@@ -201,25 +227,36 @@ int MqttClient::reconnect() {
 }
 
 void MqttClient::disconnect() {
+    publishStatusOffline();
 }
 
-void MqttClient::publish(std::string &p_topic, const std::shared_ptr<MESSAGE> &p_message) {
-    MqttMessage_ msg = std::make_pair(p_topic, p_message);
-    {
-        std::lock_guard<std::mutex> lock(m_mqttMutex);
-        m_messages.emplace_back(msg);
+void MqttClient::publishStatusOnline() {
+    static const uint8_t payload = 1;
+    publish_binary(TOPIC_STATUS, &payload, sizeof(payload), 1, true);
+}
+
+void MqttClient::publishStatusOffline() {
+    static const uint8_t payload = 0;
+    publish_binary(TOPIC_STATUS, &payload, sizeof(payload), 1, true);
+}
+
+bool MqttClient::publish_binary(const char *topic, const uint8_t *data, size_t len, int qos, bool retain) {
+    if (!topic || !data) {
+        return false;
     }
-
-    std::string componentName = "app";
-    struct lws *wsi = getWsiInstance(componentName);
-    lws_callback_on_writable(wsi);
-}
-
-void MqttClient::publish(std::string &p_topic, const std::string &payload) {
-    StringMessage_ msg = std::make_pair(p_topic, payload);
     {
         std::lock_guard<std::mutex> lock(m_mqttMutex);
-        m_stringMessages.emplace_back(std::move(msg));
+        if (m_binaryMessages.size() >= m_highWater) {
+            if (!m_highWaterWarning) {
+                SPDLOG_WARN("MqttClient send queue reached high-water mark ({})", m_highWater);
+                m_highWaterWarning = true;
+            }
+            return false;
+        }
+        if (m_binaryMessages.size() <= m_lowWater) {
+            m_highWaterWarning = false;
+        }
+        m_binaryMessages.emplace(topic, std::vector<uint8_t>(data, data + len), qos, retain);
     }
 
     std::string componentName = "app";
@@ -227,6 +264,7 @@ void MqttClient::publish(std::string &p_topic, const std::string &payload) {
     if (wsi) {
         lws_callback_on_writable(wsi);
     }
+    return true;
 }
 
 //TODO need to decide when to unsubscribe the topic,
@@ -278,55 +316,33 @@ void MqttClient::onClientWriteAble(struct lws *wsi, struct pss *pss) {
     } break;
 
     case STATE_PUBLISH_QOS0: {
-        // First try to drain a binary MESSAGE from the legacy queue.
-        MqttMessage_ elem;
-        bool hasBinary = false;
+        BinaryMessage msg;
+        bool hasMessage = false;
         {
             std::lock_guard<std::mutex> lock(m_mqttMutex);
-            if (!m_messages.empty()) {
-                elem = m_messages.front();
-                m_messages.erase(m_messages.begin());
-                hasBinary = true;
+            if (!m_binaryMessages.empty()) {
+                msg = std::move(m_binaryMessages.front());
+                m_binaryMessages.pop();
+                hasMessage = true;
             }
         }
-        if (hasBinary) {
-            m_pubParam.topic = const_cast<char *>(elem.first.c_str());
-            m_pubParam.topic_len = elem.first.length();
-            m_pubParam.qos = QOS0;
-            m_pubParam.payload_len = elem.second->length;
-            SPDLOG_INFO("Publish topic [{}], len [{}]", m_pubParam.topic, m_pubParam.payload_len);
+        if (hasMessage) {
+            m_pubParam.topic = const_cast<char *>(msg.topic);
+            m_pubParam.topic_len = static_cast<uint16_t>(std::strlen(msg.topic));
+            m_pubParam.qos = static_cast<lws_mqtt_qos_levels_t>(msg.qos);
+            m_pubParam.retain = msg.retain ? 1 : 0;
+            m_pubParam.payload = msg.payload.data();
+            m_pubParam.payload_len = static_cast<uint32_t>(msg.payload.size());
+            m_pubParam.payload_pos = 0;
+            SPDLOG_INFO("Publish topic [{}], qos [{}], retain [{}], len [{}]",
+                        m_pubParam.topic, msg.qos, msg.retain, m_pubParam.payload_len);
             if (lws_mqtt_client_send_publish(wsi, &m_pubParam,
-                                             elem.second->Union.content,
+                                             msg.payload.data(),
                                              m_pubParam.payload_len, 1)) {
-                SPDLOG_ERROR("Failed to send data");
-            }
-            break;
-        }
-
-        // Then try to drain a string message (telemetry JSON etc.)
-        StringMessage_ strElem;
-        bool hasString = false;
-        {
-            std::lock_guard<std::mutex> lock(m_mqttMutex);
-            if (!m_stringMessages.empty()) {
-                strElem = std::move(m_stringMessages.front());
-                m_stringMessages.erase(m_stringMessages.begin());
-                hasString = true;
+                SPDLOG_ERROR("Failed to send binary data");
             }
         }
-        if (hasString) {
-            m_pubParam.topic = const_cast<char *>(strElem.first.c_str());
-            m_pubParam.topic_len = strElem.first.length();
-            m_pubParam.qos = QOS0;
-            m_pubParam.payload_len = strElem.second.size();
-            SPDLOG_DEBUG("Publish string topic [{}], len [{}]", m_pubParam.topic, m_pubParam.payload_len);
-            if (lws_mqtt_client_send_publish(wsi, &m_pubParam,
-                                             strElem.second.data(),
-                                             m_pubParam.payload_len, 1)) {
-                SPDLOG_ERROR("Failed to send string data");
-            }
-        }
-    }
+    } break;
 
     default:
         break;
@@ -353,6 +369,7 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         m_isConnected = true;
         std::string componentName = "app";
         addWsiInstance(componentName, wsi);
+        publishStatusOnline();
         lws_callback_on_writable(wsi);
         break;
     }
@@ -368,7 +385,7 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         SPDLOG_TRACE("MQTT_ACK");
         if (pss->state == STATE_PUBLISH_QOS0) {
             std::lock_guard<std::mutex> lock(m_mqttMutex);
-            if (!m_messages.empty() || !m_stringMessages.empty()) {
+            if (!m_binaryMessages.empty()) {
                 lws_callback_on_writable(wsi);
             }
         }

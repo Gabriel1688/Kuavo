@@ -2,6 +2,9 @@
 #include "common/Config.h"
 #include "spdlog/fmt/ranges.h"
 #include "spdlog/spdlog.h"
+#include "utility/Utility.h"
+#include <array>
+#include <cmath>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
@@ -142,6 +145,71 @@ void UdpServer::bindDevicesToServer(int deviceId) {
  */
 void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
     auto FrameId = __builtin_bswap32(frame.FrameId);
+
+    // Parameter query response path (CAN ID 0x7FF, D[2] == 0x33 or 0x55).
+    // If the response is for a cached RID and we have the shared cache,
+    // store it directly and signal the pending reply so synchronous callers
+    // can unblock. Otherwise fall through to the normal Motor callback.
+    if (FrameId == 0x7ff && (frame.data[2] == 0x33 || frame.data[2] == 0x55)) {
+        if (m_paramCache == nullptr) {
+            static std::atomic<bool> warned = false;
+            if (!warned.exchange(true)) {
+                SPDLOG_WARN("UdpServer[{}]: parameter response received but MotorParamCache is not set; falling through to Motor::callback()", m_serverId);
+            }
+        } else {
+            const uint8_t motorId = frame.data[0];
+            const uint8_t rid = frame.data[3];
+
+            double value;
+            if ((7 <= rid && rid <= 10) || (13 <= rid && rid <= 16) || (35 <= rid && rid <= 36)) {
+                value = static_cast<double>(utility::uint8sToUint32(frame.data[4], frame.data[5], frame.data[6], frame.data[7]));
+            } else {
+                const std::array<uint8_t, 4> floatBytes = {frame.data[4], frame.data[5], frame.data[6], frame.data[7]};
+                value = static_cast<double>(utility::uint8sToFloat(floatBytes));
+            }
+
+            constexpr uint8_t RID_BUS_VOLTAGE = 0x50;
+            constexpr uint8_t RID_BUS_CURRENT = 0x51;
+            constexpr uint8_t RID_REFLECTED_ROTOR_INERTIA = 0x52;
+
+            const size_t cacheIndex = static_cast<size_t>(motorId) - 1;
+            if (cacheIndex < mercury::MotorParamCache::NUM_MOTORS) {
+                if (rid == RID_BUS_VOLTAGE) {
+                    m_paramCache->store_bus_voltage(cacheIndex, value);
+                } else if (rid == RID_BUS_CURRENT) {
+                    m_paramCache->store_bus_current(cacheIndex, value);
+                } else if (rid == RID_REFLECTED_ROTOR_INERTIA) {
+                    m_paramCache->store_reflected_rotor_inertia(cacheIndex, value);
+                }
+            }
+
+            // Consume pending reply so getRegParam() can unblock even though
+            // the frame did not go through Motor::callback().
+            {
+                std::scoped_lock lock(m_frameIdsMutex);
+                auto itmap = m_frameIds.find(frame.data[0]);
+                if (itmap != m_frameIds.end()) {
+                    auto handle = itmap->second;
+                    m_frameIds.erase(itmap);
+                    {
+                        std::scoped_lock canLock(canHandlesMutex);
+                        if (m_canHandles) {
+                            auto canIt = m_canHandles->find(handle);
+                            if (canIt != m_canHandles->end()) {
+                                auto storage = canIt->second;
+                                storage->replyEvent.set();
+                            }
+                        }
+                    }
+                }
+            }
+
+            auto pr = reinterpret_cast<const uint8_t *>(&frame);
+            SPDLOG_TRACE("param-cache --> {:04x} : {:#04x} motor={} rid={:02x} value={}",
+                         frame.FrameId, fmt::join(pr, pr + 13, " "), motorId, rid, value);
+            return;
+        }
+    }
 
     if (FrameId == 0x7ff) {
         FrameId = frame.data[0];// overwrite it with the real canId because data[0] is the low byte of CAN ID.

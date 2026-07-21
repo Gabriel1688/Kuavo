@@ -14,6 +14,11 @@ extern "C" { /* C declarations in C++     */
 #define MAX_MESSAGE_SIZE 255
 #define SMM_OutGoingRequest 0x01
 
+// Subsystem supervisory messages (DriverStation -> Leg subsystems)
+#define MSG_ENABLE_SUBSYSTEM  0x10
+#define MSG_DISABLE_SUBSYSTEM 0x11
+#define MSG_EMERGENCY_STOP    0x12
+
 /**************************************************************************
 *                                                                         *
 *                                  data structure                         *

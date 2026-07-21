@@ -247,7 +247,7 @@ private:
     T buffer_[Capacity];
 };
 
-static constexpr size_t LOG_RING_CAPACITY = 4096;
+static constexpr size_t LOG_RING_CAPACITY = 256;
 
 // ============================================================
 // Per-Source Staging Double Buffers (for shared memory)
