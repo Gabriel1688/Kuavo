@@ -64,15 +64,21 @@ void Motor::prepareWait() {
     std::lock_guard<std::mutex> lock(m_requestMutex);
     m_completed = false;
     m_requestPending = true;
+    SPDLOG_INFO("Motor[{}]::prepareWait called", m_deviceId);
 }
 
 bool Motor::waitResponse() {
+    auto t0 = std::chrono::steady_clock::now();
     std::unique_lock<std::mutex> lock(m_requestMutex);
     bool result = m_requestCv.wait_for(lock, std::chrono::milliseconds{200}, [this] { return m_completed; });
     m_requestPending = false;
+    auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
 
     if (!result) {
-        SPDLOG_ERROR("Motor[{}]::wait_response failed to get response within 200ms.", m_deviceId);
+        SPDLOG_ERROR("Motor[{}]::wait_response TIMEOUT after {}us", m_deviceId, dt);
+    } else {
+        SPDLOG_INFO("Motor[{}]::wait_response OK after {}us", m_deviceId, dt);
     }
     return result;
 }
@@ -80,8 +86,12 @@ bool Motor::waitResponse() {
 void Motor::notify() {
     {
         std::lock_guard<std::mutex> lock(m_requestMutex);
-        if (!m_requestPending) return;
+        if (!m_requestPending) {
+            SPDLOG_INFO("Motor[{}]::notify skipped (no pending request)", m_deviceId);
+            return;
+        }
         m_completed = true;
+        SPDLOG_INFO("Motor[{}]::notify completing pending request", m_deviceId);
     }
     m_requestCv.notify_one();
 }
@@ -129,63 +139,90 @@ ParamResult Motor::parseMotorParamData(const std::vector<uint8_t> &data) {
 }
 
 void Motor::enableMotor() {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_enable_motor_t{});
-    sendMessage(data);
+    prepareWait();
+    sendMessage(data, 8, 0, true);
+    waitResponse();
 }
 
 void Motor::disableMotor() {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_disable_motor_t{});
-    sendMessage(data);
+    prepareWait();
+    sendMessage(data, 8, 0, true);
+    waitResponse();
 }
 
 void Motor::setZeroCommand() {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_set_zero_position_t{});
-    sendMessage(data);
+    prepareWait();
+    sendMessage(data, 8, 0, true);
+    waitResponse();
 }
 
 void Motor::clearMotorError() {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_clear_error_t{});
-    sendMessage(data);
+    prepareWait();
+    sendMessage(data, 8, 0, true);
+    waitResponse();
 }
 
 void Motor::setMitControl(const MITParam &mit_param) {
     {
-        std::lock_guard<std::mutex> lock(m_commandMutex);
-        m_lastMitParam = mit_param;
-        m_lastSendTime = std::chrono::steady_clock::now();
+        auto t0 = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> txn(m_transactionMutex);
+        auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        if (dt > 100) {
+            SPDLOG_WARN("Motor[{}]::setMitControl waited {}us for transaction mutex", m_deviceId, dt);
+        }
+        {
+            std::lock_guard<std::mutex> lock(m_commandMutex);
+            m_lastMitParam = mit_param;
+            m_lastSendTime = std::chrono::steady_clock::now();
+        }
+        uint16_t kp_uint = utility::doubleToUint(mit_param.kp, 0, 500, 12);
+        uint16_t kd_uint = utility::doubleToUint(mit_param.kd, 0, 5, 12);
+
+        // Get motor limits based on type
+        LimitParam limits = MOTOR_LIMIT_PARAMS[static_cast<int>(m_motorType)];
+        uint16_t q_uint = utility::doubleToUint(mit_param.q, -(double) limits.pMax, (double) limits.pMax, 16);
+        uint16_t dq_uint = utility::doubleToUint(mit_param.dq, -(double) limits.vMax, (double) limits.vMax, 12);
+        uint16_t tau_uint = utility::doubleToUint(mit_param.tau, -(double) limits.tMax, (double) limits.tMax, 12);
+
+        dataframe_t df;
+        df.data[0] = static_cast<uint8_t>((q_uint >> 8) & 0xFF);
+        df.data[1] = static_cast<uint8_t>(q_uint & 0xFF);
+        df.data[2] = static_cast<uint8_t>(dq_uint >> 4);
+        df.data[3] = static_cast<uint8_t>(((dq_uint & 0xF) << 4) | ((kp_uint >> 8) & 0xF));
+        df.data[4] = static_cast<uint8_t>(kp_uint & 0xFF);
+        df.data[5] = static_cast<uint8_t>(kd_uint >> 4);
+        df.data[6] = static_cast<uint8_t>(((kd_uint & 0xF) << 4) | ((tau_uint >> 8) & 0xF));
+        df.data[7] = static_cast<uint8_t>(tau_uint & 0xFF);
+        prepareWait();
+        sendMessage(df, 8, 0, true);
+        waitResponse();
     }
-    uint16_t kp_uint = utility::doubleToUint(mit_param.kp, 0, 500, 12);
-    uint16_t kd_uint = utility::doubleToUint(mit_param.kd, 0, 5, 12);
-
-    // Get motor limits based on type
-    LimitParam limits = MOTOR_LIMIT_PARAMS[static_cast<int>(m_motorType)];
-    uint16_t q_uint = utility::doubleToUint(mit_param.q, -(double) limits.pMax, (double) limits.pMax, 16);
-    uint16_t dq_uint = utility::doubleToUint(mit_param.dq, -(double) limits.vMax, (double) limits.vMax, 12);
-    uint16_t tau_uint = utility::doubleToUint(mit_param.tau, -(double) limits.tMax, (double) limits.tMax, 12);
-
-    dataframe_t df;
-    df.data[0] = static_cast<uint8_t>((q_uint >> 8) & 0xFF);
-    df.data[1] = static_cast<uint8_t>(q_uint & 0xFF);
-    df.data[2] = static_cast<uint8_t>(dq_uint >> 4);
-    df.data[3] = static_cast<uint8_t>(((dq_uint & 0xF) << 4) | ((kp_uint >> 8) & 0xF));
-    df.data[4] = static_cast<uint8_t>(kp_uint & 0xFF);
-    df.data[5] = static_cast<uint8_t>(kd_uint >> 4);
-    df.data[6] = static_cast<uint8_t>(((kd_uint & 0xF) << 4) | ((tau_uint >> 8) & 0xF));
-    df.data[7] = static_cast<uint8_t>(tau_uint & 0xFF);
-    sendMessage(df);
 }
 
 void Motor::setPosvelControl(const PosVelParam &posvel_param) {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     auto pb = utility::floatToUint8s(static_cast<float>(posvel_param.q));
     auto vb = utility::floatToUint8s(static_cast<float>(posvel_param.dq));
 
     dataframe_t df;
     memcpy(df.data, &pb, sizeof(float));
     memcpy(df.data + 4, &vb, sizeof(float));
-    sendMessage(df);
+    prepareWait();
+    sendMessage(df, 8, 0, true);
+    waitResponse();
 }
 
 void Motor::getMotorStatus() {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data;
     data.updateMotorStatus.can_id = m_deviceId;
     data.updateMotorStatus.cmd[0] = 0xcc;
@@ -196,6 +233,13 @@ void Motor::getMotorStatus() {
 }
 
 void Motor::getRegParam(int RID) {
+    auto t0 = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
+    auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    if (dt > 100) {
+        SPDLOG_WARN("Motor[{}]::getRegParam waited {}us for transaction mutex", m_deviceId, dt);
+    }
     dataframe_t data;
     data.registerParam.can_id = m_deviceId;
     data.registerParam.cmd = 0x33;
@@ -206,20 +250,26 @@ void Motor::getRegParam(int RID) {
 }
 
 void Motor::writeRegParam(int RID, int val) {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data;
     data.registerParam.can_id = m_deviceId;
     data.registerParam.cmd = 0x55;
     data.registerParam.reg_id = RID;
     //data.writeRegisterParam.data=val;
-    sendMessage(data, 8, CMD_API_WRITE_MOTOR_PARAMETERS);
+    prepareWait();
+    sendMessage(data, 8, CMD_API_WRITE_MOTOR_PARAMETERS, true);
+    waitResponse();
 }
 
 void Motor::saveRegParam(int RID) {
+    std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data;
     data.registerParam.can_id = m_deviceId;
     data.registerParam.cmd = 0xaa;
     data.registerParam.reg_id = RID;
-    sendMessage(data, 8, CMD_API_SAVE_MOTOR_PARAMETERS);
+    prepareWait();
+    sendMessage(data, 8, CMD_API_SAVE_MOTOR_PARAMETERS, true);
+    waitResponse();
 }
 
 void Motor::callback(const uint8_t *msg, size_t size) {

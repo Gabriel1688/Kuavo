@@ -146,6 +146,8 @@ private:
     bool m_completed{false};
     bool m_requestPending{false};
 
+    std::mutex m_transactionMutex;  // serializes reply-expecting commands per motor
+
     mercury::MotorParamCache* m_paramCache = nullptr;
 
     std::shared_ptr<CAN> m_canHandle;

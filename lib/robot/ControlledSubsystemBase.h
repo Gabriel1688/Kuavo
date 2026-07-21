@@ -157,6 +157,7 @@ private:
         std::vector<pollfd> poll_items;
         poll_items.push_back(item);
 
+         //TODO:: change to 200Hz for real motor communication.
         // Use a high-resolution timer for 2.5ms (400Hz) periodic execution
         auto next_wake = std::chrono::steady_clock::now();
         static constexpr auto PERIOD = std::chrono::microseconds(2500);  // 2.5ms = 400Hz

@@ -1,0 +1,23 @@
+--- a/lib/roles/mqtt/mqtt.c
++++ b/lib/roles/mqtt/mqtt.c
+@@ -860,7 +860,17 @@
+ 			}
+ 			lwsl_debug("%s: PUBLISH topic len %d\n",
+ 				   __func__, (int)par->n);
+-			assert(!wsi->mqtt->rx_cpkt_param);
++			/* If rx_cpkt_param is still set from an earlier
++			 * incomplete PUBLISH, the struct contents may be
++			 * corrupt (e.g. from cross-thread memory stomps).
++			 * Do NOT dereference any fields — just null the
++			 * pointer (small leak) and return -1 to force a
++			 * clean reconnect. */
++			if (wsi->mqtt->rx_cpkt_param) {
++				lwsl_warn("%s: stale rx_cpkt_param %p "
++					  "— closing connection\n",
++					  __func__, wsi->mqtt->rx_cpkt_param);
++				wsi->mqtt->rx_cpkt_param = NULL;
++				return -1;
++			}
+ 			wsi->mqtt->rx_cpkt_param = lws_zalloc(
+ 				sizeof(lws_mqtt_publish_param_t), "rx pub param");
+ 			if (!wsi->mqtt->rx_cpkt_param)

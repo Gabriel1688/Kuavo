@@ -8,7 +8,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_VERBOSE_MAKEFILE ON)
 
 include(FetchContent)
-FetchContent_Declare(libwebsockets URL https://github.com/warmcat/libwebsockets/archive/refs/tags/v4.5.8.tar.gz)
+FetchContent_Declare(libwebsockets
+    URL https://github.com/warmcat/libwebsockets/archive/refs/tags/v4.5.8.tar.gz
+    PATCH_COMMAND patch -p1 -N < ${CMAKE_CURRENT_SOURCE_DIR}/../patches/lws-mqtt-rx-cpkt-param-assert.patch || true
+)
 set(LWS_WITHOUT_TESTAPPS 1)
 FetchContent_MakeAvailable(libwebsockets)
 message(CHECK_START "Fetching Eigen3")

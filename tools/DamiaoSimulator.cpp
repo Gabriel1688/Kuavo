@@ -194,13 +194,13 @@ public:
         for (size_t i = 0; i < motorIds.size(); i++) {
             MotorState motor;
             motor.canId    = motorIds[i];
-            motor.masterId = motorIds[i];  // MasterID defaults to CAN ID [2]
+            motor.masterId = motorIds[i] + 0x10;  // MasterID = CAN ID + 0x10 per Damiao protocol [2]
             motor.initDefaults();
             motors_[motorIds[i]] = motor;
-            SPDLOG_INFO(" Motor {}:  CAN_ID=[0x{}] MasterID=[0x{}]", i, motorIds[i], motorIds[i]);
+            SPDLOG_INFO(" Motor {}:  CAN_ID=[0x{}] MasterID=[0x{}]", i, motorIds[i], motorIds[i] + 0x10);
             std::cout << "  Motor " << i << ": CAN_ID=0x"
                       << std::hex << motorIds[i]
-                      << " MasterID=0x" << motorIds[i]
+                      << " MasterID=0x" << motorIds[i] + 0x10
                       << std::dec << std::endl;
         }
     }

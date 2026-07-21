@@ -86,7 +86,6 @@ private:
     mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::LOG_RING_CAPACITY> m_logRing;
     std::unique_ptr<mercury::Composer> m_composer;
     std::unique_ptr<mercury::Logger> m_logger;
-    MqttClient m_mqttClient;
 
     // Supervisory loop state
     uint64_t m_cycle = 0;

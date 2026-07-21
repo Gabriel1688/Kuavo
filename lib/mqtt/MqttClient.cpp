@@ -292,10 +292,11 @@ bool MqttClient::publish_binary(const char *topic, const uint8_t *data, size_t l
         m_binaryMessages.emplace(topic, std::vector<uint8_t>(data, data + len), qos, retain);
     }
 
-    std::string componentName = "app";
-    struct lws *wsi = getWsiInstance(componentName);
-    if (wsi) {
-        lws_callback_on_writable(wsi);
+    // Wake the LWS service thread so it can call lws_callback_on_writable()
+    // from the correct thread.  lws_cancel_service() is the ONLY LWS API
+    // that is safe to call from a non-service thread.
+    if (m_context) {
+        lws_cancel_service(m_context);
     }
     return true;
 }
@@ -445,6 +446,22 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         SPDLOG_INFO("MQTT_CLIENT_RX, topic=[{}]",
                      ((lws_mqtt_publish_param_t *)in)->topic);
         processMessage(in, len, wsi);
+        return 0;
+    case LWS_CALLBACK_EVENT_WAIT_CANCELLED:
+        /* lws_cancel_service() was called from another thread (Logger /
+         * Composer).  Now that we are back on the LWS service thread we
+         * can safely mark the wsi as writable.  We use the stored wsi
+         * because the wsi argument in this callback may be a dummy. */
+        {
+            std::string componentName = "app";
+            struct lws *mqttWsi = getWsiInstance(componentName);
+            if (mqttWsi) {
+                std::lock_guard<std::mutex> lock(m_mqttMutex);
+                if (!m_binaryMessages.empty()) {
+                    lws_callback_on_writable(mqttWsi);
+                }
+            }
+        }
         return 0;
     default:
         break;

@@ -34,9 +34,6 @@ std::shared_ptr<MESSAGE> makeSubsystemMessage(uint8_t msgType) {
 }  // namespace
 
 void Robot::robotInit() {
-    // Load MQTT config and start the libwebsockets client before anything else.
-    m_mqttClient.loadConfig("");
-    m_mqttClient.start();
 
     // Wire the shared MotorParamCache into both UdpServer instances
     // before any parameter queries are dispatched by robotPeriodic().
@@ -162,11 +159,18 @@ void Robot::robotInit() {
         m_composer->start();
         SPDLOG_INFO("Composer thread started");
 
-        // Start Logger drain thread after Composer
-        m_logger = std::make_unique<mercury::Logger>(m_logRing, m_mqttClient,
-                                                   static_cast<uint32_t>(Config::instance().mqtt().robotId));
-        m_logger->start();
-        SPDLOG_INFO("Logger thread started");
+        // Start Logger drain thread after Composer — use the global MqttClient
+        // (created by InitializeHAL) instead of a second instance, since LWS
+        // callbacks are hardwired to the global client.
+        MqttClient* globalMqtt = g_mqttClient_ptr.load();
+        if (globalMqtt) {
+            m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
+                                                       static_cast<uint32_t>(Config::instance().mqtt().robotId));
+            m_logger->start();
+            SPDLOG_INFO("Logger thread started");
+        } else {
+            SPDLOG_ERROR("Global MqttClient not available — Logger not started");
+        }
     } else {
         SPDLOG_WARN("SHM not attached — Composer and Logger threads not started");
     }
@@ -183,9 +187,6 @@ Robot::~Robot() {
         m_composer->shutdown();
         m_composer.reset();
     }
-
-    // Stop the MQTT client
-    m_mqttClient.shutdown();
 
     // Clean up shared memory mapping
     if (m_shm) {

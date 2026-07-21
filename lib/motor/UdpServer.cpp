@@ -95,10 +95,16 @@ void UdpServer::sendMsg(CANFrameId frameId, const uint8_t *data, uint8_t dataSiz
     // Register pending reply BEFORE sending to prevent race with receive thread
     if (reply) {
         std::scoped_lock lock(m_frameIdsMutex);
-        if (m_frameIds.find(frameId.replyCANId) == m_frameIds.end()) {
+        auto it = m_frameIds.find(frameId.replyCANId);
+        if (it != m_frameIds.end()) {
+            // Overwrite stale entry — previous reply was never consumed (timeout or lost)
+            SPDLOG_WARN("sendMsg: overwriting stale pending reply for device={} replyCANId={:04x} (old handle={}, new handle={})",
+                        frameId.deviceId, frameId.replyCANId, it->second, frameId.hanlde);
+            it->second = frameId.hanlde;
+        } else {
             m_frameIds.insert(std::make_pair(frameId.replyCANId, frameId.hanlde));
-            SPDLOG_TRACE("Wait reply from device [{0:d}],FrameId : [{1:04x}].",
-                         frameId.deviceId, frameId.replyCANId);
+            SPDLOG_INFO("sendMsg: registered pending reply for device={} replyCANId={:04x} handle={}",
+                        frameId.deviceId, frameId.replyCANId, frameId.hanlde);
         }
     }
 
@@ -224,6 +230,7 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
         if (itmap != m_frameIds.end()) {
             auto handle = itmap->second;
             m_frameIds.erase(itmap);// always consume the pending reply entry
+            SPDLOG_INFO("dispatchMessage: pending reply consumed for FrameId={:04x} handle={}", FrameId, handle);
             {
                 std::scoped_lock canLock(canHandlesMutex);
                 auto canIt = m_canHandles->find(handle);
@@ -237,6 +244,8 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
             if (subscriber != m_subscribers.end()) {
                 handler = subscriber->second.packetHandler;
             }
+        } else {
+            SPDLOG_INFO("dispatchMessage: no pending reply for FrameId={:04x}, m_frameIds size={}", FrameId, m_frameIds.size());
         }
     }
 
