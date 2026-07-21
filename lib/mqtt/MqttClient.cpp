@@ -161,6 +161,10 @@ void MqttClient::run() {
         // internally, but if it returns without blocking (e.g. no fds, forced
         // service, or library quirk) the tight loop can burn 100% CPU.
         // Guard with a 1 ms floor so worst-case is ~1000 iterations/sec.
+        if (!m_shutdown && !m_isConnected && !m_reconnectPending &&
+            std::chrono::steady_clock::now() >= m_reconnectAt) {
+            reconnect();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     lws_context_destroy(m_context);
@@ -223,7 +227,36 @@ int MqttClient::connect(struct lws_context *pcontext) {
 }
 
 int MqttClient::reconnect() {
-    return 0;
+    if (!m_context || m_reconnectPending || m_shutdown) {
+        return 1;
+    }
+
+    m_reconnectPending = true;
+    SPDLOG_INFO("MQTT reconnect attempt (delay {} ms)", m_reconnectDelay.count());
+    int ret = connect(m_context);
+    if (ret != 0) {
+        m_reconnectPending = false;
+        m_reconnectAt = std::chrono::steady_clock::now() + m_reconnectDelay;
+        if (m_reconnectDelay < std::chrono::milliseconds(30000) / 2) {
+            m_reconnectDelay *= 2;
+        } else {
+            m_reconnectDelay = std::chrono::milliseconds(30000);
+        }
+    }
+    return ret;
+}
+
+void MqttClient::scheduleReconnect() {
+    if (m_shutdown) {
+        return;
+    }
+    m_reconnectPending = false;
+    m_reconnectAt = std::chrono::steady_clock::now() + m_reconnectDelay;
+    if (m_reconnectDelay < std::chrono::milliseconds(30000) / 2) {
+        m_reconnectDelay *= 2;
+    } else {
+        m_reconnectDelay = std::chrono::milliseconds(30000);
+    }
 }
 
 void MqttClient::disconnect() {
@@ -298,8 +331,9 @@ int MqttClient::notifyCallback(lws_state_manager_t *mgr,
 void MqttClient::onClientWriteAble(struct lws *wsi, struct pss *pss) {
     switch (pss->state) {
     case STATE_SUBSCRIBE: {
-        SPDLOG_TRACE("Subscribing");
+        SPDLOG_INFO("Subscribing to {} topic(s):", m_topics.size());
         for (int idx = 0; idx < m_topics.size(); ++idx) {
+            SPDLOG_INFO("  topic[{}] = '{}'", idx, m_topics[idx]);
             lws_mqtt_topic_elem_t elem;
             elem.name = m_topics[idx].c_str();
             elem.qos = QOS0;
@@ -311,6 +345,8 @@ void MqttClient::onClientWriteAble(struct lws *wsi, struct pss *pss) {
 
         if (lws_mqtt_client_send_subcribe(wsi, &m_subParam)) {
             SPDLOG_ERROR("Failed to subscribe ");
+        } else {
+            SPDLOG_INFO("Subscribe sent successfully");
         }
         pss->state = STATE_PUBLISH_QOS0;
     } break;
@@ -356,17 +392,22 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
         SPDLOG_ERROR("CLIENT_CONNECTION_ERROR: {}", in ? (const char *) in : "(null)");
         m_isConnected = false;
+        scheduleReconnect();
         break;
     case LWS_CALLBACK_MQTT_CLIENT_CLOSED: {
-        SPDLOG_TRACE("CLIENT_CLOSED");
+        SPDLOG_INFO("CLIENT_CLOSED");
         m_isConnected = false;
         std::string componentName = "app";
         removeWsiInstance(componentName);
+        scheduleReconnect();
         break;
     }
     case LWS_CALLBACK_MQTT_CLIENT_ESTABLISHED: {
-        SPDLOG_TRACE("MQTT_CLIENT_ESTABLISHED");
+        SPDLOG_INFO("MQTT_CLIENT_ESTABLISHED");
         m_isConnected = true;
+        m_reconnectPending = false;
+        m_reconnectDelay = std::chrono::milliseconds(1000);
+        m_reconnectAt = std::chrono::steady_clock::time_point::max();
         std::string componentName = "app";
         addWsiInstance(componentName, wsi);
         publishStatusOnline();
@@ -375,14 +416,15 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
     }
 
     case LWS_CALLBACK_MQTT_SUBSCRIBED:
-        SPDLOG_TRACE("MQTT_SUBSCRIBED");
+        SPDLOG_INFO("MQTT_SUBSCRIBED");
         break;
 
     case LWS_CALLBACK_MQTT_CLIENT_WRITEABLE:
+        SPDLOG_INFO("MQTT_CLIENT_WRITEABLE, pss->state={}", pss->state);
         onClientWriteAble(wsi, pss);
         break;
     case LWS_CALLBACK_MQTT_ACK:
-        SPDLOG_TRACE("MQTT_ACK");
+        SPDLOG_INFO("MQTT_ACK");
         if (pss->state == STATE_PUBLISH_QOS0) {
             std::lock_guard<std::mutex> lock(m_mqttMutex);
             if (!m_binaryMessages.empty()) {
@@ -391,7 +433,7 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         }
         break;
     case LWS_CALLBACK_MQTT_RESEND:
-        SPDLOG_TRACE("MQTT_RESEND");
+        SPDLOG_INFO("MQTT_RESEND");
         if (++pss->retries == 3) {
             break;
         }
@@ -400,7 +442,8 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         break;
 
     case LWS_CALLBACK_MQTT_CLIENT_RX:
-        SPDLOG_TRACE("MQTT_CLIENT_RX");
+        SPDLOG_INFO("MQTT_CLIENT_RX, topic=[{}]",
+                     ((lws_mqtt_publish_param_t *)in)->topic);
         processMessage(in, len, wsi);
         return 0;
     default:

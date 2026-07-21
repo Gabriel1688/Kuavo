@@ -155,6 +155,7 @@ public:
     void onClientWriteAble(struct lws *wsi, struct pss *pss);
     void publishStatusOnline();
     void publishStatusOffline();
+    void scheduleReconnect();
 
     static constexpr const char *TOPIC_COMMAND_BIN = "robot/command/bin";
     static constexpr const char *TOPIC_SENSOR_BIN = "robot/sensor/bin";
@@ -165,6 +166,9 @@ public:
     pthread_t m_thrId;
 
     std::atomic<bool> m_isConnected{false};
+    std::chrono::steady_clock::time_point m_reconnectAt{std::chrono::steady_clock::time_point::max()};
+    std::chrono::milliseconds m_reconnectDelay{1000};
+    bool m_reconnectPending{false};
     std::vector<lws_mqtt_topic_elem_t> m_mqttTopics;
     std::vector<std::string> m_topics;
     std::string m_clientId;
