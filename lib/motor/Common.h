@@ -10,7 +10,7 @@
 #define CAN_MAX_DLEN 8
 typedef unsigned char __u8;
 #define CAN_SFF_MASK 0x000007FFU
-#define MAX_CAN_DEVICE 6
+#define MAX_CAN_DEVICE 7
 
 enum class MotorType : uint8_t {
     DM8009 = 0,

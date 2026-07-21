@@ -1,5 +1,8 @@
 #include "CAN.h"
 #include "UdpServer.h"
+#include "common/Config.h"
+#include "spdlog/spdlog.h"
+#include <atomic>
 
 CAN::CAN(int deviceId) {
     int32_t status = 0;
@@ -14,7 +17,15 @@ CAN::CAN(int deviceId, int deviceManufacturer, int deviceType) {
 }
 
 void CAN::registrateCallback(const int32_t deviceId, const client_observer_t<uint8_t> &observer) {
-    if (deviceId < MAX_CAN_DEVICE) {
+    static std::atomic<bool> warned{false};
+    const int maxCanDevice = Config::instance().motor().maxCanDevice;
+
+    if (maxCanDevice != MAX_CAN_DEVICE && !warned.exchange(true)) {
+        SPDLOG_WARN("Configured max_can_device ({}) differs from compile-time default ({}). Using configured value.",
+                    maxCanDevice, MAX_CAN_DEVICE);
+    }
+
+    if (deviceId < maxCanDevice) {
         UdpServer::getInstance(0).subscribe(deviceId, observer);
         UdpServer::getInstance(0).bindDevicesToServer(deviceId);
     } else {
@@ -22,12 +33,6 @@ void CAN::registrateCallback(const int32_t deviceId, const client_observer_t<uin
         UdpServer::getInstance(1).bindDevicesToServer(deviceId);
     }
 }
-//
-//void CAN::readPacketTimeout(const uint8_t *data, int length, int apiId, CANData *receiveData, int timeoutMs) {
-//    int32_t status = 0;
-//    HAL_WriteCANPacket(m_handle, data, length, apiId, &status);
-//    //std::cout << "CAN::writePacket Received response." << std::endl;
-//}
 
 void CAN::writePacket(const uint8_t *data, int length, int apiId, bool reply) {
     int32_t status = 0;
@@ -66,10 +71,6 @@ bool CAN::readPacketLatest(int apiId, CANData *data) {
 bool CAN::readPacketTimeout(int apiId, int timeoutMs, CANData *data) {
     int32_t status = 0;
     HAL_ReadCANPacketTimeout(m_handle, apiId, data->data, &data->length, &data->timestamp, timeoutMs, &status);
-    //    if (status == HAL_CAN_TIMEOUT ||
-    //        status == HAL_ERR_CANSessionMux_MessageNotFound) {
-    //        return false;
-    //    }
     if (status != 0) {
         return false;
     } else {

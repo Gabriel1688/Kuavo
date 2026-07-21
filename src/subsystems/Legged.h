@@ -16,6 +16,7 @@ class UdpServer;
 class Motor;
 
 namespace mercury {
+class MotorParamCache;
 struct SharedMemoryLayout;
 struct MotorGroupStageData;
 template<typename T> struct SourceDoubleBuffer;
@@ -44,7 +45,8 @@ public:
 
     Legged(int baseId,
            mercury::SharedMemoryLayout* shm = nullptr,
-           mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging = nullptr);
+           mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging = nullptr,
+           mercury::MotorParamCache* paramCache = nullptr);
 
     ~Legged();
 

@@ -12,11 +12,16 @@
 #include <mutex>
 #include <vector>
 
+namespace mercury { class MotorParamCache; }
+
+static_assert(std::atomic<double>::is_always_lock_free,
+              "std::atomic<double> must be lock-free for real-time use");
+
 //MIT_MODE = 0x000
 class Motor {
 public:
     // Constructor
-    Motor(MotorType motor_type, uint32_t device_id);
+    Motor(MotorType motor_type, uint32_t device_id, mercury::MotorParamCache* param_cache = nullptr);
 
     // State getters
     /*
@@ -24,8 +29,7 @@ public:
      * @return motor position
      */
     double getPosition() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_stateQ;
+        return m_stateQ.load(std::memory_order_acquire);
     }
 
     /*
@@ -33,8 +37,7 @@ public:
      * @return motor Velocity
      */
     double getVelocity() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_stateDq;
+        return m_stateDq.load(std::memory_order_acquire);
     }
 
     /*
@@ -42,16 +45,13 @@ public:
      * @return motor torque
      */
     double getTorque() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_stateTau;
+        return m_stateTau.load(std::memory_order_acquire);
     }
     int getStateTmos() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_stateTmos;
+        return m_stateTmos.load(std::memory_order_acquire);
     }
     int getStateTrotor() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_stateTrotor;
+        return m_stateTrotor.load(std::memory_order_acquire);
     }
 
     // Motor property getters
@@ -60,22 +60,20 @@ public:
     MotorType getMotorType() const { return m_motorType; }
 
     int getState() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_status;
+        return m_status.load(std::memory_order_acquire);
     }
 
     MITParam getLastMitParam() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
+        std::lock_guard<std::mutex> lock(m_commandMutex);
         return m_lastMitParam;
     }
 
-    std::chrono::steady_clock::time_point getLastUpdateTime() const {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        return m_lastUpdateTime;
+    uint64_t getLastUpdateTime() const {
+        return m_lastUpdateTime.load(std::memory_order_acquire);
     }
 
     // Enable status getters
-    bool isEnabled() const { return m_enabled; }
+    bool isEnabled() const { return m_enabled.load(); }
 
     // Parameter methods
     double getParam(int RID) const;
@@ -107,12 +105,10 @@ public:
     void setEnabled(bool enabled);
     void setTempParam(int RID, int val);
     void setStateTmos(int tmos) {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_stateTmos = tmos;
+        m_stateTmos.store(tmos, std::memory_order_release);
     }
     void setStateTrotor(int trotor) {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_stateTrotor = trotor;
+        m_stateTrotor.store(trotor, std::memory_order_release);
     }
 
 private:
@@ -127,14 +123,14 @@ private:
 
     // Enable status
     std::atomic<bool> m_enabled{false};
-    int m_status;
+    std::atomic<int> m_status;
 
     // Current state
-    double m_stateQ, m_stateDq, m_stateTau;
-    int m_stateTmos, m_stateTrotor;
+    std::atomic<double> m_stateQ, m_stateDq, m_stateTau;
+    std::atomic<int> m_stateTmos, m_stateTrotor;
     MITParam m_lastMitParam{};
     std::chrono::steady_clock::time_point m_lastSendTime{};
-    std::chrono::steady_clock::time_point m_lastUpdateTime{};
+    std::atomic<uint64_t> m_lastUpdateTime{};
 
     // Motor feedback parameters  --reserved.
     // https://github.com/dmBots/motor-control-routine/blob/9137a5bdacc295ccd165ef6e7d06e649a517d096/
@@ -143,11 +139,14 @@ private:
 
     // Parameter storage
     std::map<int, double> m_paramDict;
-    mutable std::mutex m_stateMutex;
+    mutable std::mutex m_paramMutex;
+    mutable std::mutex m_commandMutex;
     std::mutex m_requestMutex;
     std::condition_variable m_requestCv;
     bool m_completed{false};
     bool m_requestPending{false};
+
+    mercury::MotorParamCache* m_paramCache = nullptr;
 
     std::shared_ptr<CAN> m_canHandle;
     client_observer_t<uint8_t> m_observer;

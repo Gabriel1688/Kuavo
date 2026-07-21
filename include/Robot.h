@@ -71,8 +71,9 @@ private:
     XboxController m_controller{0};
     GenericHID m_joystick{0};
 
-    Legged leftLeg{Config::instance().findLeg("left")->baseId};
-    //Legged rightLeg{Config::instance().findLeg("right")->baseId};
+    mercury::MotorParamCache m_paramCache;
+    Legged leftLeg{Config::instance().findLeg("left")->baseId, nullptr, nullptr, &m_paramCache};
+    //Legged rightLeg{Config::instance().findLeg("right")->baseId, nullptr, nullptr, &m_paramCache};
     Imu imu_subsystem;
 
     // Shared memory for health monitoring (lock-free composed buffer)
@@ -80,7 +81,6 @@ private:
     int m_shm_fd = -1;
 
     // Composer thread and supporting infrastructure
-    mercury::MotorParamCache m_paramCache;
     mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::BATCH_RING_CAPACITY> m_logRing;
     std::unique_ptr<mercury::Composer> m_composer;
 

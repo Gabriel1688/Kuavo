@@ -14,11 +14,11 @@
 //TODO:: refactor the base class of subsystem.
 
 static constexpr uint64_t COMMAND_STALE_THRESHOLD_NS = 100'000'000ULL;  // 100ms
-static constexpr auto MOTOR_RESPONSIVE_TIMEOUT = std::chrono::milliseconds(100);
 
 Legged::Legged(int baseId,
                mercury::SharedMemoryLayout* shm,
-               mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging)
+               mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* staging,
+               mercury::MotorParamCache* paramCache)
     : baseId(baseId), m_shm(shm), m_staging(staging) {
     // Compute joint index offset: left leg = 0, right leg = MOTORS_PER_GROUP
     m_groupOffset = (baseId == 1) ? 0 : mercury::MOTORS_PER_GROUP;
@@ -29,7 +29,7 @@ Legged::Legged(int baseId,
     reset(Pose2d{0.0, 0.0, 0.0});
     int motorsPerLeg = Config::instance().motor().motorsPerLeg;
     for (int idx = baseId; idx < baseId + motorsPerLeg; idx++) {
-        motors.emplace_back(std::make_shared<Motor>(MotorType::DM8009, idx));
+        motors.emplace_back(std::make_shared<Motor>(MotorType::DM8009, idx, paramCache));
     }
     m_motorResponsive.resize(motors.size(), false);
     // Enable all motors
@@ -97,7 +97,7 @@ void Legged::controllerPeriodic() {
     // 6.3: Check motor responsiveness (100ms timeout)
     if (m_staging) {
         mercury::MotorGroupStageData stageData{};
-        auto now_tp = std::chrono::steady_clock::now();
+        static constexpr uint64_t MOTOR_RESPONSIVE_TIMEOUT_NS = 100'000'000ULL;
 
         for (size_t i = 0; i < motors.size(); i++) {
             stageData.joint_jpos[i]  = motors[i]->getPosition();
@@ -109,9 +109,8 @@ void Legged::controllerPeriodic() {
             stageData.rotor_temperature[i] = motors[i]->getStateTrotor();
             stageData.motor_status[i] = static_cast<uint8_t>(motors[i]->getState());
 
-            // 6.3: Update motor responsiveness tracking
-            auto lastUpdate = motors[i]->getLastUpdateTime();
-            bool responsive = (now_tp - lastUpdate) < MOTOR_RESPONSIVE_TIMEOUT;
+            uint64_t lastUpdate = motors[i]->getLastUpdateTime();
+            bool responsive = (now_ns - lastUpdate) < MOTOR_RESPONSIVE_TIMEOUT_NS;
             if (m_motorResponsive[i] && !responsive) {
                 SPDLOG_WARN("[{}] Motor {} unresponsive (>100ms).", getName(), motors[i]->getSendId());
             }

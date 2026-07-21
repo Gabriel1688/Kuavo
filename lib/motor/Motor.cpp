@@ -1,19 +1,31 @@
 #include "Motor.h"
 #include "common/Config.h"
+#include "composer/MotorParamCache.h"
 #include "spdlog/spdlog.h"
 #include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility/Utility.h>
+#include "../tools/mercury_shm_v2.h"
 
-Motor::Motor(MotorType motor_type, uint32_t device_id)
+namespace {
+// RID-to-MotorParamCache mapping. Values must be confirmed against the
+// Damiao motor register map before deployment.
+constexpr uint8_t RID_BUS_VOLTAGE = 0x50;
+constexpr uint8_t RID_BUS_CURRENT = 0x51;
+constexpr uint8_t RID_REFLECTED_ROTOR_INERTIA = 0x52;
+}
+
+Motor::Motor(MotorType motor_type, uint32_t device_id, mercury::MotorParamCache* param_cache)
     : m_deviceId(device_id),
       m_motorType(motor_type),
+      m_status(0),
       m_stateQ(0.0),
       m_stateDq(0.0),
       m_stateTau(0.0),
       m_stateTmos(0),
-      m_stateTrotor(0) {
+      m_stateTrotor(0),
+      m_paramCache(param_cache) {
     m_canHandle = std::make_shared<CAN>(device_id);
     m_observer.wantedIP = Config::instance().motor().observerIp;
     m_observer.packetHandler = std::bind(&Motor::callback, this, std::placeholders::_1, std::placeholders::_2);
@@ -23,14 +35,14 @@ Motor::Motor(MotorType motor_type, uint32_t device_id)
 void Motor::setEnabled(bool enabled) { m_enabled.store(enabled); }
 
 double Motor::getParam(int RID) const {
-    std::lock_guard<std::mutex> lock(m_stateMutex);
+    std::lock_guard<std::mutex> lock(m_paramMutex);
     auto it = m_paramDict.find(RID);
     return (it != m_paramDict.end()) ? it->second : -1;
 }
 
 void Motor::setTempParam(int RID, int val) {
     {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
+        std::lock_guard<std::mutex> lock(m_paramMutex);
         m_paramDict[RID] = val;
     }
     notify();
@@ -38,16 +50,13 @@ void Motor::setTempParam(int RID, int val) {
 
 // State update methods
 void Motor::updateState(int status, double q, double dq, double tau, int tmos, int trotor) {
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_status = status;
-        m_stateQ = q;
-        m_stateDq = dq;
-        m_stateTau = tau;
-        m_stateTmos = tmos;
-        m_stateTrotor = trotor;
-        m_lastUpdateTime = std::chrono::steady_clock::now();
-    }
+    m_status.store(status, std::memory_order_release);
+    m_stateQ.store(q, std::memory_order_release);
+    m_stateDq.store(dq, std::memory_order_release);
+    m_stateTau.store(tau, std::memory_order_release);
+    m_stateTmos.store(tmos, std::memory_order_release);
+    m_stateTrotor.store(trotor, std::memory_order_release);
+    m_lastUpdateTime.store(mercury::get_monotonic_ns(), std::memory_order_release);
     notify();
 }
 
@@ -141,7 +150,7 @@ void Motor::clearMotorError() {
 
 void Motor::setMitControl(const MITParam &mit_param) {
     {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
+        std::lock_guard<std::mutex> lock(m_commandMutex);
         m_lastMitParam = mit_param;
         m_lastSendTime = std::chrono::steady_clock::now();
     }
@@ -220,6 +229,16 @@ void Motor::callback(const uint8_t *msg, size_t size) {
     ParamResult paramResult = parseMotorParamData(data);
     if (paramResult.valid) {
         setTempParam(paramResult.rid, paramResult.value);
+        if (m_paramCache) {
+            const size_t idx = static_cast<size_t>(m_deviceId - 1);
+            if (paramResult.rid == RID_BUS_VOLTAGE) {
+                m_paramCache->store_bus_voltage(idx, paramResult.value);
+            } else if (paramResult.rid == RID_BUS_CURRENT) {
+                m_paramCache->store_bus_current(idx, paramResult.value);
+            } else if (paramResult.rid == RID_REFLECTED_ROTOR_INERTIA) {
+                m_paramCache->store_reflected_rotor_inertia(idx, paramResult.value);
+            }
+        }
         return;
     }
 
