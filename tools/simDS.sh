@@ -7,7 +7,7 @@ while true; do
  i=$((i + 1))
  echo -e "\n\nrun unit test  $i th times\n\n"
  mosquitto_pub -t "test/topic1" -f button_pressed.bin
- sleep 0.5
+ sleep 0.1
  mosquitto_pub -t "test/topic1" -f button_released.bin
- sleep 0.5
+ sleep 0.1
 done

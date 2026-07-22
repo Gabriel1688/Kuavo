@@ -21,6 +21,7 @@ mqtt:
     - test/topic1
 
 # --- UDP Network ---
+# TWO UDP server, one for left and one for right leg.
 udp:
   server_ip: 127.0.0.1
   base_local_port: 8887       # localPort  = base_local_port  + server_id * 2
@@ -32,7 +33,7 @@ udp:
 # --- IMU Interface ---
 imu:
   server_ip: 127.0.0.1
-  local_port: 8887            # localPort  = base_local_port  + server_id * 2
+  local_port: 8890            # localPort  = base_local_port  + server_id * 2
   value_mode: float           # float or int
   base_id: 514
 

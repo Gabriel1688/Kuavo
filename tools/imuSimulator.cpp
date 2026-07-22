@@ -476,8 +476,8 @@ static void printUsage(const char* prog) {
 }
 
 int main(int argc, char* argv[]) {
-    int localPort  = 8886;
-    int remotePort = 8887;   // Shares with UdpServer 0 [2][3]
+    int localPort  = 8891;
+    int remotePort = 8890;   // Shares with UdpServer 0 [2][3]
     int freqHz     = DEFAULT_FREQ_HZ;
     uint32_t baseCanId = DEFAULT_CAN_BASE_ID;
 

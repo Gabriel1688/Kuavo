@@ -7,6 +7,9 @@
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/spdlog.h"
 #include <cerrno>
+#include <cstdio>
+#include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <unistd.h>
@@ -163,6 +166,7 @@ void Robot::robotInit() {
         // (created by InitializeHAL) instead of a second instance, since LWS
         // callbacks are hardwired to the global client.
         MqttClient* globalMqtt = g_mqttClient_ptr.load();
+        m_mqtt = globalMqtt;
         if (globalMqtt) {
             m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
                                                        static_cast<uint32_t>(Config::instance().mqtt().robotId));
@@ -220,6 +224,8 @@ void Robot::teleopInit() {
  * Periodic code for all modes should go here.
  */
 void Robot::robotPeriodic() {
+    uint64_t rp_start = mercury::get_monotonic_ns();
+
     // D4 Task 2: Button event polling
     m_loop.poll();
 
@@ -284,6 +290,25 @@ void Robot::robotPeriodic() {
     // D4 Task 7: Subsystem periodic dispatch (lightweight)
     SubsystemBase::runAllRobotPeriodic();
 
+    uint64_t rp_end = mercury::get_monotonic_ns();
+    uint32_t robot_us = static_cast<uint32_t>((rp_end - rp_start) / 1000ULL);
+    uint32_t robot_jitter_us = 0;
+    if (m_lastRobotStartNs != 0) {
+        robot_jitter_us = static_cast<uint32_t>((rp_start - m_lastRobotStartNs) / 1000ULL);
+    }
+    m_lastRobotStartNs = rp_start;
+
+    if (m_mqtt) {
+        char buf[256];
+        int n = std::snprintf(buf, sizeof(buf),
+            R"([{"bn":"kuavo:robot:","n":"robotPeriodic","t":0,"v":%u,"u":"us"},{"n":"robotJitter","v":%u,"u":"us"},{"n":"cycle","v":%u}])",
+            robot_us, robot_jitter_us, static_cast<uint32_t>(m_cycle));
+        m_mqtt->publish_binary("robot/timing",
+                               reinterpret_cast<const uint8_t*>(buf),
+                               static_cast<size_t>(n), 0, false);
+    }
+    SPDLOG_DEBUG("[timing] robotPeriodic cycle={} duration_us={} jitter_us={}", m_cycle, robot_us, robot_jitter_us);
+
     m_cycle++;
 
     //https://github.com/frc3512/Robot-2020/blob/b416c202794fb7deea0081beff2f986de7001ed9/src/main/cpp/Robot.cpp#L126
@@ -312,7 +337,13 @@ void Robot::updateStateCallback(std::string result) {
     //TODO:: consider what need to be done here.
 }
 void setupLogger();
+
+static void handle_sigterm(int) {
+    std::exit(0);
+}
+
 int main() {
+    std::signal(SIGTERM, handle_sigterm);
     setupLogger();
     //https://github.com/wpilibsuite/allwpilib/blob/7ca35e5678cf32caec6a1a866ca51d0136c4c398/wpilibcExamples/src/main/cpp/examples/HAL/c/Robot.c#L52
     return StartRobot<Robot>();

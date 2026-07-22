@@ -251,4 +251,8 @@ private:
     // Cross-process shared memory pointers (owned by Robot, not by Legged)
     mercury::SharedMemoryLayout* m_shm = nullptr;
     mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* m_staging = nullptr;
+
+    // Timing state
+    uint64_t m_lastControllerStartNs = 0;
+    void logControllerTiming(uint64_t start_ns, uint64_t end_ns);
 };

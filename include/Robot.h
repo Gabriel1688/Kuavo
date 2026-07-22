@@ -91,4 +91,8 @@ private:
     uint64_t m_cycle = 0;
     uint32_t m_imu_stale_counter = 0;
 
+    // Timing state
+    MqttClient* m_mqtt = nullptr;
+    uint64_t m_lastRobotStartNs = 0;
+
 };

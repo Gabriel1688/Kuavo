@@ -8,7 +8,9 @@
 #include "robot/RobotBase.h"
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/spdlog.h"
+#include "mqtt/MqttClient.h"
 #include <unistd.h>
+#include <cstdio>
 #include "../tools/mercury_shm_v2.h"
 //TODO:: how to get the contact state from the gamepad?
 //TODO:: refactor the base class of subsystem.
@@ -44,9 +46,12 @@ void Legged::reset(const Pose2d &initialPose) {
 }
 
 void Legged::controllerPeriodic() {
+    uint64_t cp_start = mercury::get_monotonic_ns();
+
     // 4.2: Null-check SHM pointer
     if (!m_shm) {
         SPDLOG_TRACE("[{}] controllerPeriodic: SHM not attached, skipping.", getName());
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
         return;
     }
 
@@ -59,6 +64,7 @@ void Legged::controllerPeriodic() {
     if (cmd.timestamp_ns > 0 && (now_ns - cmd.timestamp_ns) > COMMAND_STALE_THRESHOLD_NS) {
         SPDLOG_WARN("[{}] controllerPeriodic: command stale ({}ms), skipping MIT dispatch.",
                     getName(), (now_ns - cmd.timestamp_ns) / 1'000'000ULL);
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
         return;
     }
 
@@ -69,6 +75,7 @@ void Legged::controllerPeriodic() {
             motor->disableMotor();
         }
         SPDLOG_TRACE("[{}] controllerPeriodic: emergency_stop active, motors disabled.", getName());
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
         return;
     }
 
@@ -122,6 +129,30 @@ void Legged::controllerPeriodic() {
         stageData.sequence = m_shm->composed_sequence.load(std::memory_order_relaxed) + 1;
         m_staging->publish(stageData);
     }
+    logControllerTiming(cp_start, mercury::get_monotonic_ns());
+}
+
+void Legged::logControllerTiming(uint64_t start_ns, uint64_t end_ns) {
+    if (start_ns == 0 || end_ns <= start_ns) {
+        return;
+    }
+    uint32_t duration_us = static_cast<uint32_t>((end_ns - start_ns) / 1000ULL);
+    uint32_t interval_us = 0;
+    if (m_lastControllerStartNs != 0) {
+        interval_us = static_cast<uint32_t>((start_ns - m_lastControllerStartNs) / 1000ULL);
+    }
+    m_lastControllerStartNs = start_ns;
+
+    if (auto* mqtt = g_mqttClient_ptr.load()) {
+        char buf[256];
+        int n = std::snprintf(buf, sizeof(buf),
+            R"([{"bn":"kuavo:leg:%s:","n":"controllerPeriodic","t":0,"v":%u,"u":"us"},{"n":"controllerJitter","v":%u,"u":"us"}])",
+            getName().c_str(), duration_us, interval_us);
+        mqtt->publish_binary("robot/timing",
+                             reinterpret_cast<const uint8_t*>(buf),
+                             static_cast<size_t>(n), 0, false);
+    }
+    SPDLOG_DEBUG("[timing] {} controllerPeriodic duration_us={} jitter_us={}", getName(), duration_us, interval_us);
 }
 
 void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
