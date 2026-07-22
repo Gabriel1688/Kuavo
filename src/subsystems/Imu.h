@@ -35,6 +35,9 @@ public:
     /** Start the underlying CAN reader thread. */
     void start() { m_reader.start(); }
 
+    /** Stop the underlying CAN reader thread. */
+    void stop() { m_reader.shutdown(); }
+
 private:
     std::atomic<bool> m_isEnabled{false};
     ImuReader m_reader;

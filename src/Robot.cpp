@@ -43,43 +43,14 @@ void Robot::robotInit() {
     UdpServer::getInstance(0).setParamCache(&m_paramCache);
     UdpServer::getInstance(1).setParamCache(&m_paramCache);
 
-    // Attach to POSIX shared memory for health monitoring
-    m_shm_fd = shm_open(mercury::SHM_NAME, O_RDWR, 0666);
-    if (m_shm_fd < 0) {
-        // If SHM doesn't exist yet, create it (first process to start)
-        m_shm_fd = shm_open(mercury::SHM_NAME, O_CREAT | O_RDWR, 0666);
-        if (m_shm_fd < 0) {
-            SPDLOG_ERROR("Failed to open/create SHM {}: {}", mercury::SHM_NAME, strerror(errno));
-        } else {
-            if (ftruncate(m_shm_fd, sizeof(mercury::SharedMemoryLayout)) != 0) {
-                SPDLOG_ERROR("Failed to size SHM: {}", strerror(errno));
-            }
-        }
+    // Attach to the producer's POSIX shared memory. The producer owns the
+    // SHM lifecycle; the consumer refuses to start without a valid region.
+    m_shm = tryAttachSharedMemory();
+    if (!m_shm) {
+        SPDLOG_ERROR("Failed to attach to producer SHM — exiting");
+        std::exit(EXIT_FAILURE);
     }
-    if (m_shm_fd >= 0) {
-        void* ptr = mmap(nullptr, sizeof(mercury::SharedMemoryLayout),
-                         PROT_READ | PROT_WRITE, MAP_SHARED, m_shm_fd, 0);
-        if (ptr == MAP_FAILED) {
-            SPDLOG_ERROR("Failed to mmap SHM: {}", strerror(errno));
-            close(m_shm_fd);
-            m_shm_fd = -1;
-        } else {
-            m_shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
-            SPDLOG_INFO("Attached to SHM {} ({}B)", mercury::SHM_NAME, sizeof(mercury::SharedMemoryLayout));
-        }
-    }
-
-    // Pass SHM and staging buffer pointers to leg subsystems
-    if (m_shm) {
-        leftLeg.setShmPointers(m_shm, &m_shm->motor_group_a_stage);
-        rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
-    }
-
-    // Wire the IMU staging buffer before starting the reader thread
-    if (m_shm) {
-        imu_subsystem.setStagingBuffer(&m_shm->imu_stage);
-    }
-    imu_subsystem.start();
+    attachSharedMemory();
 
     // Helper no-op callback for async subsystem messages
     TCallback noop = [](std::string &) {};
@@ -149,35 +120,6 @@ void Robot::robotInit() {
         rightLeg.message(makeSubsystemMessage(MSG_EMERGENCY_STOP), noop);
         SPDLOG_ERROR("EMERGENCY STOP activated by operator");
     });
-
-    // Start Composer thread (reads staging buffers, writes composed SHM + SPSC ring)
-    if (m_shm) {
-        m_composer = std::make_unique<mercury::Composer>(
-            m_shm->imu_stage,
-            m_shm->motor_group_a_stage,
-            m_shm->motor_group_b_stage,
-            m_paramCache,
-            *m_shm,
-            m_logRing);
-        m_composer->start();
-        SPDLOG_INFO("Composer thread started");
-
-        // Start Logger drain thread after Composer — use the global MqttClient
-        // (created by InitializeHAL) instead of a second instance, since LWS
-        // callbacks are hardwired to the global client.
-        MqttClient* globalMqtt = g_mqttClient_ptr.load();
-        m_mqtt = globalMqtt;
-        if (globalMqtt) {
-            m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
-                                                       static_cast<uint32_t>(Config::instance().mqtt().robotId));
-            m_logger->start();
-            SPDLOG_INFO("Logger thread started");
-        } else {
-            SPDLOG_ERROR("Global MqttClient not available — Logger not started");
-        }
-    } else {
-        SPDLOG_WARN("SHM not attached — Composer and Logger threads not started");
-    }
 }
 Robot::~Robot() {
     // Shutdown Logger thread before Composer to stop publishing
@@ -196,10 +138,6 @@ Robot::~Robot() {
     if (m_shm) {
         munmap(m_shm, sizeof(mercury::SharedMemoryLayout));
         m_shm = nullptr;
-    }
-    if (m_shm_fd >= 0) {
-        close(m_shm_fd);
-        m_shm_fd = -1;
     }
 }
 
@@ -228,6 +166,35 @@ void Robot::robotPeriodic() {
 
     // D4 Task 2: Button event polling
     m_loop.poll();
+
+    // IPC SHM lifecycle: check producer liveness and reattach if needed
+    if (m_shm) {
+        uint64_t now_ns = mercury::get_monotonic_ns();
+        uint32_t magic = m_shm->magic.load(std::memory_order_acquire);
+        auto lifecycle = static_cast<mercury::ShmLifecycle>(
+            m_shm->lifecycle_state.load(std::memory_order_acquire));
+        uint64_t heartbeat = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
+
+        if (magic != mercury::SHM_MAGIC ||
+            m_shm->version != mercury::SHM_VERSION ||
+            lifecycle != mercury::ShmLifecycle::RUNNING ||
+            heartbeat == 0 || heartbeat > now_ns ||
+            (now_ns - heartbeat) > mercury::HEARTBEAT_STALE_NS) {
+            SPDLOG_ERROR("Producer SHM lost — detaching and disabling subsystems");
+            leftLeg.setEnable(false);
+            rightLeg.setEnable(false);
+            detachSharedMemory();
+        }
+    }
+
+    if (!m_shm && (m_cycle % 10 == 0)) {
+        SPDLOG_INFO("Attempting SHM reattach (cycle={})", m_cycle);
+        m_shm = tryAttachSharedMemory();
+        if (m_shm) {
+            SPDLOG_INFO("Reconnected to producer SHM");
+            attachSharedMemory();
+        }
+    }
 
     // D4 Tasks 4-5: Health monitoring + safety validation via composed SHM buffer
     if (m_composer && m_shm) {
@@ -262,7 +229,7 @@ void Robot::robotPeriodic() {
         uint64_t hb = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
         if (hb > 0) {
             uint64_t now_ns = mercury::get_monotonic_ns();
-            if (now_ns - hb > 100'000'000ULL) {  // > 100ms stale
+            if (hb > now_ns || (now_ns - hb) > mercury::HEARTBEAT_STALE_NS) {  // > 100ms stale
                 SPDLOG_ERROR("Mercury Controller heartbeat stale (>100ms) — emergency stop");
                 m_shm->emergency_stop.store(true, std::memory_order_release);
             }
@@ -336,6 +303,157 @@ void Robot::updateStateCallback(std::string result) {
     SPDLOG_TRACE("Async command response :[{}].", result);
     //TODO:: consider what need to be done here.
 }
+
+mercury::SharedMemoryLayout* Robot::tryAttachSharedMemory() {
+    int fd = shm_open(mercury::SHM_NAME, O_RDWR, 0666);
+    if (fd < 0) {
+        SPDLOG_INFO("SHM {} not found: {}", mercury::SHM_NAME, strerror(errno));
+        return nullptr;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        SPDLOG_WARN("SHM {} fstat failed: {}", mercury::SHM_NAME, strerror(errno));
+        close(fd);
+        return nullptr;
+    }
+
+    if (st.st_size < static_cast<off_t>(sizeof(mercury::SharedMemoryLayout))) {
+        SPDLOG_WARN("SHM {} too small: {} < {}", mercury::SHM_NAME, st.st_size, sizeof(mercury::SharedMemoryLayout));
+        close(fd);
+        return nullptr;
+    }
+
+    void* ptr = mmap(nullptr, sizeof(mercury::SharedMemoryLayout),
+                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (ptr == MAP_FAILED) {
+        SPDLOG_WARN("SHM {} mmap failed: {}", mercury::SHM_NAME, strerror(errno));
+        return nullptr;
+    }
+
+    auto* shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
+
+    uint32_t magic = shm->magic.load(std::memory_order_acquire);
+    if (magic != mercury::SHM_MAGIC) {
+        SPDLOG_INFO("SHM {} invalid magic: 0x{:08X}", mercury::SHM_NAME, magic);
+        munmap(shm, sizeof(mercury::SharedMemoryLayout));
+        return nullptr;
+    }
+
+    if (shm->version != mercury::SHM_VERSION) {
+        SPDLOG_WARN("SHM {} version mismatch: expected {}, got {}",
+                     mercury::SHM_NAME, mercury::SHM_VERSION, shm->version);
+        munmap(shm, sizeof(mercury::SharedMemoryLayout));
+        return nullptr;
+    }
+
+    auto lifecycle = static_cast<mercury::ShmLifecycle>(
+        shm->lifecycle_state.load(std::memory_order_acquire));
+    if (lifecycle != mercury::ShmLifecycle::RUNNING) {
+        SPDLOG_INFO("SHM {} not RUNNING: {}", mercury::SHM_NAME,
+                     static_cast<uint32_t>(lifecycle));
+        munmap(shm, sizeof(mercury::SharedMemoryLayout));
+        return nullptr;
+    }
+
+    uint64_t now = mercury::get_monotonic_ns();
+    uint64_t heartbeat = shm->controller_heartbeat_ns.load(std::memory_order_acquire);
+    if (heartbeat == 0 || heartbeat > now || (now - heartbeat) > mercury::HEARTBEAT_STALE_NS) {
+        SPDLOG_INFO("SHM {} heartbeat stale ({} ms)", mercury::SHM_NAME,
+                     heartbeat > now ? 0 : (now - heartbeat) / 1'000'000ULL);
+        munmap(shm, sizeof(mercury::SharedMemoryLayout));
+        return nullptr;
+    }
+
+    SPDLOG_INFO("Attached to SHM {} ({}B) v{}", mercury::SHM_NAME,
+                sizeof(mercury::SharedMemoryLayout), shm->version);
+    return shm;
+}
+
+void Robot::detachSharedMemory() {
+    if (!m_shm) return;
+
+    SPDLOG_INFO("Detaching from SHM {} (m_shm={})", mercury::SHM_NAME, reinterpret_cast<uintptr_t>(m_shm));
+
+    // Save pointer for deferred munmap; clear m_shm FIRST so leg threads
+    // and robotPeriodic() stop dereferencing it before we unmap.
+    auto* shm_to_unmap = m_shm;
+    m_shm = nullptr;
+
+    leftLeg.setEnable(false);
+    rightLeg.setEnable(false);
+    leftLeg.pause();
+    rightLeg.pause();
+
+    // Clear subsystem SHM pointers while threads are paused
+    leftLeg.setShmPointers(nullptr, nullptr);
+    rightLeg.setShmPointers(nullptr, nullptr);
+    imu_subsystem.setStagingBuffer(nullptr);
+
+    // Resume leg threads (they will see m_shm==null and return immediately)
+    leftLeg.resume();
+    rightLeg.resume();
+
+    imu_subsystem.stop();
+
+    // Shutdown Logger before Composer (Logger drains from the ring that
+    // Composer writes to)
+    if (m_logger) {
+        m_logger->shutdown();
+        m_logger.reset();
+    }
+    if (m_composer) {
+        m_composer->shutdown();
+        m_composer.reset();
+    }
+
+    // Now safe to unmap — no threads hold references to shm_to_unmap
+    munmap(shm_to_unmap, sizeof(mercury::SharedMemoryLayout));
+    SPDLOG_INFO("SHM detached and unmapped");
+    m_imu_stale_counter = 0;
+}
+
+void Robot::attachSharedMemory() {
+    if (!m_shm) return;
+
+    SPDLOG_INFO("Attaching subsystems to SHM {}", mercury::SHM_NAME);
+
+    imu_subsystem.setStagingBuffer(&m_shm->imu_stage);
+    imu_subsystem.start();
+
+    // Pause leg threads while we inject new SHM pointers
+    leftLeg.pause();
+    rightLeg.pause();
+
+    leftLeg.setShmPointers(m_shm, &m_shm->motor_group_a_stage);
+    rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
+
+    leftLeg.resume();
+    rightLeg.resume();
+
+    m_composer = std::make_unique<mercury::Composer>(
+        m_shm->imu_stage,
+        m_shm->motor_group_a_stage,
+        m_shm->motor_group_b_stage,
+        m_paramCache,
+        *m_shm,
+        m_logRing);
+    m_composer->start();
+    SPDLOG_INFO("Composer thread started");
+
+    MqttClient* globalMqtt = g_mqttClient_ptr.load();
+    m_mqtt = globalMqtt;
+    if (globalMqtt) {
+        m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
+                                                     static_cast<uint32_t>(Config::instance().mqtt().robotId));
+        m_logger->start();
+        SPDLOG_INFO("Logger thread started");
+    } else {
+        SPDLOG_ERROR("Global MqttClient not available — Logger not started");
+    }
+}
+
 void setupLogger();
 
 static void handle_sigterm(int) {

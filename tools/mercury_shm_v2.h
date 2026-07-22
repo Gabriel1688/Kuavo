@@ -32,6 +32,16 @@ static constexpr int NUM_ACT_JOINT = 12;
 static constexpr int MOTORS_PER_GROUP = 6;
 static constexpr const char* SHM_NAME = "/mercury_robot_ipc";
 static constexpr uint32_t SHM_MAGIC = 0x4D455243; // "MERC"
+static constexpr uint32_t SHM_VERSION = 3;
+static constexpr uint64_t HEARTBEAT_STALE_NS = 100'000'000ULL;  // 100ms
+
+enum class ShmLifecycle : uint32_t {
+    UNINITIALIZED = 0,
+    INITIALIZING  = 1,
+    RUNNING       = 2,
+    SHUTTING_DOWN = 3,
+    TERMINATED    = 4,
+};
 
 // MQTT topics — simplified, single robot per edge device
 static constexpr const char* MQTT_TOPIC_CMD    = "robot/command/bin";
@@ -289,9 +299,11 @@ struct SourceDoubleBuffer {
     void publish(const T& data) {
         uint32_t wb = 1 - write_idx.load(std::memory_order_acquire);
         std::memcpy(&buffers[wb], &data, sizeof(T));
-        write_idx.store(wb, std::memory_order_release);
-        sequence.fetch_add(1, std::memory_order_release);
-        heartbeat_ns.store(data.timestamp_ns, std::memory_order_release);
+        // Update metadata BEFORE flipping write_idx so readers who see
+        // the new index also see consistent sequence/heartbeat.
+        sequence.fetch_add(1, std::memory_order_relaxed);
+        heartbeat_ns.store(data.timestamp_ns, std::memory_order_relaxed);
+        write_idx.store(wb, std::memory_order_release);  // release fence
     }
 
     T read() const {
@@ -308,10 +320,11 @@ struct SourceDoubleBuffer {
 // ============================================================
 
 struct SharedMemoryLayout {
-    uint32_t magic;
+    std::atomic<uint32_t> magic;
     uint32_t version;
     uint32_t num_joints;
     uint32_t control_freq_hz;
+    std::atomic<uint32_t> lifecycle_state;
 
     SourceDoubleBuffer<ImuStageData>        imu_stage;
     SourceDoubleBuffer<MotorGroupStageData> motor_group_a_stage;
@@ -331,6 +344,17 @@ struct SharedMemoryLayout {
     uint16_t motor_can_ids[NUM_ACT_JOINT];
     uint32_t robot_id;
 };
+
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
+              "atomic<uint32_t> must match uint32_t size for SHM compatibility");
+static_assert(alignof(std::atomic<uint32_t>) == alignof(uint32_t),
+              "atomic<uint32_t> must match uint32_t alignment for SHM compatibility");
+static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t),
+              "atomic<uint64_t> must match uint64_t size for SHM compatibility");
+static_assert(alignof(std::atomic<uint64_t>) == alignof(uint64_t),
+              "atomic<uint64_t> must match uint64_t alignment for SHM compatibility");
+static_assert(sizeof(SharedMemoryLayout) % 8 == 0,
+              "SharedMemoryLayout must be 8-byte aligned for cross-platform compatibility");
 
 // Damiao motor protocol constants [2]
 static constexpr double P_MAX = 12.5;

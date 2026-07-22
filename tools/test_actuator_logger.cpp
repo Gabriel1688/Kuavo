@@ -612,12 +612,24 @@ int main(int argc, char* argv[]) {
     close(fd);
     if (ptr == MAP_FAILED) { perror("mmap"); return 1; }
     g_layout = static_cast<SharedMemoryLayout*>(ptr);
-    if (g_layout->magic != SHM_MAGIC) {
+
+    // Validate SHM state before using it
+    uint32_t magic = g_layout->magic.load(std::memory_order_acquire);
+    if (magic != SHM_MAGIC) {
         fprintf(stderr, "Invalid SHM magic\n"); return 1;
+    }
+    if (g_layout->version != SHM_VERSION) {
+        fprintf(stderr, "Invalid SHM version (expected %u, got %u)\n",
+                SHM_VERSION, g_layout->version); return 1;
+    }
+    auto lifecycle = static_cast<ShmLifecycle>(
+        g_layout->lifecycle_state.load(std::memory_order_acquire));
+    if (lifecycle != ShmLifecycle::RUNNING) {
+        fprintf(stderr, "SHM not in RUNNING state\n"); return 1;
     }
     g_layout->robot_id = g_robot_id;
 
-    printf("Actuator+Logger: %u joints, robot_id=%u, broker=%s:%d\n",
+    printf("Actuator+Logger: %u joints, robot_id=%u, broker=%s:%d, state=RUNNING\n",
            g_layout->num_joints, g_robot_id, broker_host, broker_port);
     printf("Payload sizes: SensorData=%zu  Command=%zu  Header=%zu\n",
            sizeof(SensorData), sizeof(Command), sizeof(BinaryPayloadHeader));

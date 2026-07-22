@@ -237,6 +237,8 @@ private:
 
     bool isEnabled();
 
+    void disableAllMotorsOnce();
+
     void setCommandMode(uint32_t _mode);
 
     std::vector<std::shared_ptr<Motor>> motors;
@@ -251,6 +253,9 @@ private:
     // Cross-process shared memory pointers (owned by Robot, not by Legged)
     mercury::SharedMemoryLayout* m_shm = nullptr;
     mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* m_staging = nullptr;
+
+    // Motor safety state
+    std::atomic<bool> m_motorsFaultDisabled{false};
 
     // Timing state
     uint64_t m_lastControllerStartNs = 0;

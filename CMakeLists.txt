@@ -51,7 +51,9 @@ target_include_directories(
         lib
         src
 )
-target_link_options(Kuavo PRIVATE -pg)
+if(NOT ENABLE_ASAN)
+    target_link_options(Kuavo PRIVATE -pg)
+endif()
 target_link_libraries(
         Kuavo
         PUBLIC

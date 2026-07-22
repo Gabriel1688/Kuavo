@@ -78,9 +78,13 @@ private:
     Legged rightLeg{Config::instance().findLeg("right")->baseId, nullptr, nullptr, &m_paramCache};
     Imu imu_subsystem;
 
+    // SHM lifecycle helpers
+    mercury::SharedMemoryLayout* tryAttachSharedMemory();
+    void detachSharedMemory();
+    void attachSharedMemory();
+
     // Shared memory for health monitoring (lock-free composed buffer)
     mercury::SharedMemoryLayout* m_shm = nullptr;
-    int m_shm_fd = -1;
 
     // Composer thread and supporting infrastructure
     mercury::SPSCRingBuffer<mercury::BatchLogRecord, mercury::LOG_RING_CAPACITY> m_logRing;

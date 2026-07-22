@@ -105,6 +105,31 @@ public:
     bool isEnabled() const { return m_isEnabled; }
 
     /**
+     * Pauses the real-time control loop so callers can safely modify shared
+     * state (e.g., unmap the shared memory backing the subsystem). Blocks until
+     * the current controllerPeriodic() call finishes or a short timeout expires.
+     */
+    void pause() {
+        m_pauseRequested.store(true, std::memory_order_release);
+        auto start = std::chrono::steady_clock::now();
+        while (m_inControllerPeriodic.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+            auto now = std::chrono::steady_clock::now();
+            if (now - start > std::chrono::milliseconds(5)) {
+                SPDLOG_ERROR("ControlledSubsystemBase::pause timeout");
+                break;
+            }
+        }
+    }
+
+    /**
+     * Resumes the real-time control loop after pause().
+     */
+    void resume() {
+        m_pauseRequested.store(false, std::memory_order_release);
+    }
+
+    /**
      * Returns the most recent timestep.
      */
     // units::second_t GetDt() const { return m_dt; }
@@ -191,8 +216,10 @@ private:
 
             // Execute controllerPeriodic() on schedule
             now = std::chrono::steady_clock::now();
-            if (now >= next_wake && m_isEnabled) {
+            if (now >= next_wake && m_isEnabled && !m_pauseRequested.load(std::memory_order_acquire)) {
+                m_inControllerPeriodic.store(true, std::memory_order_release);
                 controllerPeriodic();
+                m_inControllerPeriodic.store(false, std::memory_order_release);
                 next_wake += PERIOD;
                 // Catch up if we fell behind (avoid spiral)
                 if (next_wake < now) {
@@ -207,6 +234,8 @@ private:
     int m_dt = 5;
     std::atomic<bool> m_isEnabled{false};
     std::atomic<bool> m_entryThreadRunning{false};
+    std::atomic<bool> m_pauseRequested{false};
+    std::atomic<bool> m_inControllerPeriodic{false};
     pthread_t thread_id;
     Fifo<std::function<void()>> send_queue_;
 };

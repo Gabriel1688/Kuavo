@@ -169,3 +169,16 @@ target_link_libraries(
         pthread
         rt
 )
+
+add_executable(
+        test_shm_lifecycle
+        test_shm_lifecycle.cpp
+        mercury_shm_v2.h
+)
+
+target_link_libraries(
+        test_shm_lifecycle
+        PRIVATE
+        pthread
+        rt
+)

@@ -15,7 +15,8 @@
 //TODO:: how to get the contact state from the gamepad?
 //TODO:: refactor the base class of subsystem.
 
-static constexpr uint64_t COMMAND_STALE_THRESHOLD_NS = 100'000'000ULL;  // 100ms
+static constexpr uint64_t COMMAND_STALE_THRESHOLD_NS = mercury::HEARTBEAT_STALE_NS;
+static constexpr uint64_t HEARTBEAT_TIMEOUT_NS = mercury::HEARTBEAT_STALE_NS;
 
 Legged::Legged(int baseId,
                mercury::SharedMemoryLayout* shm,
@@ -47,20 +48,68 @@ void Legged::reset(const Pose2d &initialPose) {
 
 void Legged::controllerPeriodic() {
     uint64_t cp_start = mercury::get_monotonic_ns();
+    uint64_t now_ns = mercury::get_monotonic_ns();
 
-    // 4.2: Null-check SHM pointer
+    // SHM lifecycle validation (every 2.5ms / 400Hz)
     if (!m_shm) {
         SPDLOG_TRACE("[{}] controllerPeriodic: SHM not attached, skipping.", getName());
         logControllerTiming(cp_start, mercury::get_monotonic_ns());
         return;
     }
 
-    // 4.1: Read Mercury_Command from SHM double buffer (lock-free)
+    uint32_t magic = m_shm->magic.load(std::memory_order_acquire);
+    if (magic != mercury::SHM_MAGIC) {
+        SPDLOG_TRACE("[{}] controllerPeriodic: invalid SHM magic, skipping.", getName());
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
+
+    if (m_shm->version != mercury::SHM_VERSION) {
+        SPDLOG_WARN("[{}] controllerPeriodic: SHM version mismatch (expected {}, got {}), disabling motors.",
+                    getName(), mercury::SHM_VERSION, m_shm->version);
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
+
+    auto lifecycle = static_cast<mercury::ShmLifecycle>(
+        m_shm->lifecycle_state.load(std::memory_order_acquire));
+    if (lifecycle != mercury::ShmLifecycle::RUNNING) {
+        SPDLOG_TRACE("[{}] controllerPeriodic: SHM lifecycle state is not RUNNING, disabling motors.", getName());
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
+
+    uint64_t heartbeat = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
+    if (heartbeat == 0 || (now_ns - heartbeat) > HEARTBEAT_TIMEOUT_NS) {
+        SPDLOG_WARN("[{}] controllerPeriodic: producer heartbeat stale ({}ms), disabling motors.",
+                    getName(), (now_ns - heartbeat) / 1'000'000ULL);
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
+
+    if (m_shm->emergency_stop.load(std::memory_order_acquire)) {
+        SPDLOG_TRACE("[{}] controllerPeriodic: emergency_stop active, disabling motors.", getName());
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
+
+    // Read Mercury_Command from SHM double buffer (lock-free)
     uint32_t cmd_idx = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+    if (cmd_idx > 1) {
+        SPDLOG_WARN("[{}] controllerPeriodic: invalid cmd_write_idx ({}), disabling motors.",
+                    getName(), cmd_idx);
+        disableAllMotorsOnce();
+        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        return;
+    }
     const mercury::Command& cmd = m_shm->cmd_buffers[cmd_idx];
 
-    // 4.3: Check command freshness
-    uint64_t now_ns = mercury::get_monotonic_ns();
+    // Check command freshness
     if (cmd.timestamp_ns > 0 && (now_ns - cmd.timestamp_ns) > COMMAND_STALE_THRESHOLD_NS) {
         SPDLOG_WARN("[{}] controllerPeriodic: command stale ({}ms), skipping MIT dispatch.",
                     getName(), (now_ns - cmd.timestamp_ns) / 1'000'000ULL);
@@ -68,18 +117,7 @@ void Legged::controllerPeriodic() {
         return;
     }
 
-    // 4.4: Check emergency_stop flag
-    if (m_shm->emergency_stop.load(std::memory_order_acquire)) {
-        // Send disable to all motors on emergency stop
-        for (auto& motor : motors) {
-            motor->disableMotor();
-        }
-        SPDLOG_TRACE("[{}] controllerPeriodic: emergency_stop active, motors disabled.", getName());
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
-        return;
-    }
-
-    // 4.5-4.7: For each motor, extract command and dispatch MIT frame
+    // Dispatch MIT commands to motors
     for (size_t i = 0; i < motors.size(); i++) {
         int j = m_groupOffset + static_cast<int>(i);
 
@@ -301,6 +339,7 @@ void Legged::reboot() {
 
 void Legged::setEnable(bool _enable) {
     if (_enable && !m_isEnabled) {
+        m_motorsFaultDisabled.store(false, std::memory_order_release);
         std::for_each(motors.begin(),motors.end(), [](const auto &motor) {
             motor->enableMotor();
         } );
@@ -313,6 +352,16 @@ void Legged::setEnable(bool _enable) {
         });
         disable();
         SPDLOG_INFO("[{}] Leg  is Disabled.", baseId == 1 ? "Left" : "Right");
+    }
+}
+
+void Legged::disableAllMotorsOnce() {
+    bool expected = false;
+    if (m_motorsFaultDisabled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        for (auto& motor : motors) {
+            motor->disableMotor();
+        }
+        SPDLOG_WARN("[{}] All motors disabled (fault shutdown).", getName());
     }
 }
 

@@ -45,13 +45,17 @@ public:
 
         layout_ = static_cast<SharedMemoryLayout*>(ptr);
 
-        // Initialize header
-        layout_->magic = SHM_MAGIC;
-        layout_->version = 2;  // v2 layout
+        // Initialize header (magic is written LAST as the release-acquire sentinel)
+        layout_->version = SHM_VERSION;  // v3 layout
         layout_->num_joints = num_joints;
         layout_->control_freq_hz = control_freq;
         layout_->robot_id = 1;
         layout_->emergency_stop.store(false, std::memory_order_relaxed);
+        layout_->controller_heartbeat_ns.store(get_monotonic_ns(), std::memory_order_relaxed);
+        layout_->lifecycle_state.store(
+            static_cast<uint32_t>(ShmLifecycle::RUNNING),
+            std::memory_order_release);
+        layout_->magic.store(SHM_MAGIC, std::memory_order_release);
 
         std::memset(layout_->cmd_buffers, 0, sizeof(layout_->cmd_buffers));
         std::memset(layout_->composed_buffers, 0, sizeof(layout_->composed_buffers));
@@ -234,7 +238,13 @@ public:
 
     ~ControllerTestBench() {
         if (layout_) {
+            layout_->lifecycle_state.store(
+                static_cast<uint32_t>(ShmLifecycle::SHUTTING_DOWN),
+                std::memory_order_release);
             layout_->emergency_stop.store(true, std::memory_order_release);
+            layout_->lifecycle_state.store(
+                static_cast<uint32_t>(ShmLifecycle::TERMINATED),
+                std::memory_order_release);
             munmap(layout_, sizeof(SharedMemoryLayout));
         }
         shm_unlink(SHM_NAME);
