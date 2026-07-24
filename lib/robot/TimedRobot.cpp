@@ -14,8 +14,9 @@ void TimedRobot::startCompetition() {
     // Set main robot loop to SCHED_FIFO priority 75 (100 Hz, 10 ms)
     struct sched_param param{};
     param.sched_priority = 75;
-    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) != 0) {
-        SPDLOG_WARN("Main Loop: failed to set SCHED_FIFO/75: {}", strerror(errno));
+    int ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+    if (ret != 0) {
+        SPDLOG_WARN("Main Loop: failed to set SCHED_FIFO/75: {}", strerror(ret));
     } else {
         SPDLOG_INFO("Main Loop: SCHED_FIFO priority 75");
     }

@@ -5,10 +5,10 @@
 #include "DmFrame.h"
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -81,9 +81,6 @@ public:
     // Static methods for motor properties
     static LimitParam getLimitParam(MotorType motor_type);
 
-    void prepareWait();
-    bool waitResponse();
-
     // CAN Commands
     void enableMotor();
     void disableMotor();
@@ -115,7 +112,6 @@ private:
     void sendMessage(dataframe_t &dataFrame, int len = 8, int command_id = 0, bool reply = false);
     StateResult parseMotorStateData(const std::vector<uint8_t> &data);
     ParamResult parseMotorParamData(const std::vector<uint8_t> &data);
-    void notify();
 
     // Motor identifiers
     uint32_t m_deviceId;
@@ -141,12 +137,8 @@ private:
     std::map<int, double> m_paramDict;
     mutable std::mutex m_paramMutex;
     mutable std::mutex m_commandMutex;
-    std::mutex m_requestMutex;
-    std::condition_variable m_requestCv;
-    bool m_completed{false};
-    bool m_requestPending{false};
 
-    std::mutex m_transactionMutex;  // serializes reply-expecting commands per motor
+    std::mutex m_transactionMutex;  // serializes commands per motor
 
     mercury::MotorParamCache* m_paramCache = nullptr;
 

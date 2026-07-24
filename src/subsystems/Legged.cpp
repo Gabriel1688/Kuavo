@@ -8,7 +8,6 @@
 #include "robot/RobotBase.h"
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/spdlog.h"
-#include "mqtt/MqttClient.h"
 #include <unistd.h>
 #include <cstdio>
 #include "../tools/mercury_shm_v2.h"
@@ -41,6 +40,9 @@ Legged::Legged(int baseId,
         motor->enableMotor();
     }
     usleep(200);
+    // Signal that the derived class is fully constructed and
+    // controllerPeriodic() is safe to call from the RT thread.
+    markReady();
 }
 
 void Legged::reset(const Pose2d &initialPose) {
@@ -48,94 +50,102 @@ void Legged::reset(const Pose2d &initialPose) {
 
 void Legged::controllerPeriodic() {
     uint64_t cp_start = mercury::get_monotonic_ns();
-    uint64_t now_ns = mercury::get_monotonic_ns();
+    uint64_t now_ns = cp_start;
 
     // SHM lifecycle validation (every 2.5ms / 400Hz)
     if (!m_shm) {
         SPDLOG_TRACE("[{}] controllerPeriodic: SHM not attached, skipping.", getName());
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
         return;
     }
 
     uint32_t magic = m_shm->magic.load(std::memory_order_acquire);
     if (magic != mercury::SHM_MAGIC) {
         SPDLOG_TRACE("[{}] controllerPeriodic: invalid SHM magic, skipping.", getName());
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        disableAllMotorsOnce(SHM_INVALID_MAGIC);
         return;
     }
 
     if (m_shm->version != mercury::SHM_VERSION) {
         SPDLOG_WARN("[{}] controllerPeriodic: SHM version mismatch (expected {}, got {}), disabling motors.",
                     getName(), mercury::SHM_VERSION, m_shm->version);
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        disableAllMotorsOnce(SHM_VERSION_MISMATCH);
         return;
     }
 
     auto lifecycle = static_cast<mercury::ShmLifecycle>(
         m_shm->lifecycle_state.load(std::memory_order_acquire));
     if (lifecycle != mercury::ShmLifecycle::RUNNING) {
-        SPDLOG_TRACE("[{}] controllerPeriodic: SHM lifecycle state is not RUNNING, disabling motors.", getName());
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        SPDLOG_TRACE("[{}] controllerPeriodic: SHM lifecycle not RUNNING, skipping.", getName());
+        disableAllMotorsOnce(SHM_LIFECYCLE_NOT_RUNNING);
         return;
     }
 
     uint64_t heartbeat = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
-    if (heartbeat == 0 || (now_ns - heartbeat) > HEARTBEAT_TIMEOUT_NS) {
+    uint64_t hb_age_ns = (heartbeat != 0 && heartbeat <= now_ns)
+                        ? (now_ns - heartbeat) : 0;
+    if (heartbeat == 0 || hb_age_ns > HEARTBEAT_TIMEOUT_NS) {
         SPDLOG_WARN("[{}] controllerPeriodic: producer heartbeat stale ({}ms), disabling motors.",
-                    getName(), (now_ns - heartbeat) / 1'000'000ULL);
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+                    getName(), hb_age_ns / 1'000'000ULL);
+        disableAllMotorsOnce(HEARTBEAT_STALE);
         return;
     }
 
+    // TODO: Re-enable emergency_stop motor disable once the producer/operator
+    // emergency-stop semantics are finalized.
+#if 0
     if (m_shm->emergency_stop.load(std::memory_order_acquire)) {
         SPDLOG_TRACE("[{}] controllerPeriodic: emergency_stop active, disabling motors.", getName());
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
+        disableAllMotorsOnce(EMERGENCY_STOP_ACTIVE);
         return;
     }
+#endif
 
-    // Read Mercury_Command from SHM double buffer (lock-free)
-    uint32_t cmd_idx = m_shm->cmd_write_idx.load(std::memory_order_acquire);
-    if (cmd_idx > 1) {
-        SPDLOG_WARN("[{}] controllerPeriodic: invalid cmd_write_idx ({}), disabling motors.",
-                    getName(), cmd_idx);
-        disableAllMotorsOnce();
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
-        return;
-    }
-    const mercury::Command& cmd = m_shm->cmd_buffers[cmd_idx];
+    // Gate actuation on isEnabled().  Observation (motor feedback staging
+    // below) always runs so the Composer can track liveness and clear
+    // staleness even while the leg is disabled.
+    if (isEnabled()) {
+        // Read Mercury_Command from SHM double buffer (lock-free)
+        uint32_t cmd_idx = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+        if (cmd_idx > 1) {
+            SPDLOG_WARN("[{}] controllerPeriodic: invalid cmd_write_idx ({}), disabling motors.",
+                        getName(), cmd_idx);
+            disableAllMotorsOnce(CMD_WRITE_IDX_INVALID);
+        } else {
+            const mercury::Command& cmd = m_shm->cmd_buffers[cmd_idx];
 
-    // Check command freshness
-    if (cmd.timestamp_ns > 0 && (now_ns - cmd.timestamp_ns) > COMMAND_STALE_THRESHOLD_NS) {
-        SPDLOG_WARN("[{}] controllerPeriodic: command stale ({}ms), skipping MIT dispatch.",
-                    getName(), (now_ns - cmd.timestamp_ns) / 1'000'000ULL);
-        logControllerTiming(cp_start, mercury::get_monotonic_ns());
-        return;
-    }
+            // Check command freshness (guard unsigned underflow when
+            // cmd.timestamp_ns is slightly ahead of the captured now_ns)
+            uint64_t cmd_age_ns = (cmd.timestamp_ns > 0 && cmd.timestamp_ns <= now_ns)
+                                ? (now_ns - cmd.timestamp_ns) : 0;
+            if (cmd.timestamp_ns > 0 && cmd_age_ns > COMMAND_STALE_THRESHOLD_NS) {
+                SPDLOG_WARN("[{}] controllerPeriodic: command stale ({}ms), skipping MIT dispatch.",
+                            getName(), cmd_age_ns / 1'000'000ULL);
+            } else {
+                // Dispatch MIT commands to motors
+                size_t dispatched = 0;
+                for (size_t i = 0; i < motors.size(); i++) {
+                    int j = m_groupOffset + static_cast<int>(i);
 
-    // Dispatch MIT commands to motors
-    for (size_t i = 0; i < motors.size(); i++) {
-        int j = m_groupOffset + static_cast<int>(i);
+                    // 4.6: Check enabled field — skip MIT dispatch if motor not enabled
+                    // Controllers write 1 (boolean true) for enabled, 0 for disabled.
+                    if (!cmd.enabled[j]) {
+                        continue;
+                    }
 
-        // 4.6: Check enabled field — skip MIT dispatch if not 0xFC
-        if (cmd.enabled[j] != 0xFC) {
-            continue;
+                    // 4.5: Extract per-joint command
+                    // 4.7: Construct MITParam and call setMitControl
+                    MITParam mit;
+                    mit.kp  = cmd.kp[j];
+                    mit.kd  = cmd.kd[j];
+                    mit.q   = cmd.jpos_cmd[j];
+                    mit.dq  = cmd.jvel_cmd[j];
+                    mit.tau = cmd.jtorque_cmd[j];
+
+                    motors[i]->setMitControl(mit);
+                    dispatched++;
+                }
+            }
         }
-
-        // 4.5: Extract per-joint command
-        // 4.7: Construct MITParam and call setMitControl
-        MITParam mit;
-        mit.kp  = cmd.kp[j];
-        mit.kd  = cmd.kd[j];
-        mit.q   = cmd.jpos_cmd[j];
-        mit.dq  = cmd.jvel_cmd[j];
-        mit.tau = cmd.jtorque_cmd[j];
-
-        motors[i]->setMitControl(mit);
     }
 
     // 4.8: Aggregate motor feedback into MotorGroupStageData
@@ -155,42 +165,32 @@ void Legged::controllerPeriodic() {
             stageData.motor_status[i] = static_cast<uint8_t>(motors[i]->getState());
 
             uint64_t lastUpdate = motors[i]->getLastUpdateTime();
-            bool responsive = (now_ns - lastUpdate) < MOTOR_RESPONSIVE_TIMEOUT_NS;
-            if (m_motorResponsive[i] && !responsive) {
-                SPDLOG_WARN("[{}] Motor {} unresponsive (>100ms).", getName(), motors[i]->getSendId());
-            }
+            // Guard against unsigned underflow: if lastUpdate > now_ns the
+            // motor callback fired after we sampled cp_start — treat as
+            // responsive (age = 0).
+            uint64_t age_ns = (lastUpdate != 0 && lastUpdate <= now_ns)
+                            ? (now_ns - lastUpdate) : 0;
+            bool responsive = (lastUpdate != 0) && (age_ns < MOTOR_RESPONSIVE_TIMEOUT_NS);
             m_motorResponsive[i] = responsive;
         }
+
+        // Embed controller timing into staging data (lock-free, no MQTT)
+        uint64_t cp_end = mercury::get_monotonic_ns();
+        stageData.controller_duration_us = static_cast<uint32_t>((cp_end - cp_start) / 1000ULL);
+        stageData.controller_interval_us = (m_lastControllerStartNs != 0)
+            ? static_cast<uint32_t>((cp_start - m_lastControllerStartNs) / 1000ULL) : 0;
+        m_lastControllerStartNs = cp_start;
 
         // 4.9: Publish to staging buffer with current timestamp
         stageData.timestamp_ns = now_ns;
         stageData.sequence = m_shm->composed_sequence.load(std::memory_order_relaxed) + 1;
         m_staging->publish(stageData);
     }
-    logControllerTiming(cp_start, mercury::get_monotonic_ns());
-}
-
-void Legged::logControllerTiming(uint64_t start_ns, uint64_t end_ns) {
-    if (start_ns == 0 || end_ns <= start_ns) {
-        return;
-    }
-    uint32_t duration_us = static_cast<uint32_t>((end_ns - start_ns) / 1000ULL);
-    uint32_t interval_us = 0;
-    if (m_lastControllerStartNs != 0) {
-        interval_us = static_cast<uint32_t>((start_ns - m_lastControllerStartNs) / 1000ULL);
-    }
-    m_lastControllerStartNs = start_ns;
-
-    if (auto* mqtt = g_mqttClient_ptr.load()) {
-        char buf[256];
-        int n = std::snprintf(buf, sizeof(buf),
-            R"([{"bn":"kuavo:leg:%s:","n":"controllerPeriodic","t":0,"v":%u,"u":"us"},{"n":"controllerJitter","v":%u,"u":"us"}])",
-            getName().c_str(), duration_us, interval_us);
-        mqtt->publish_binary("robot/timing",
-                             reinterpret_cast<const uint8_t*>(buf),
-                             static_cast<size_t>(n), 0, false);
-    }
-    SPDLOG_DEBUG("[timing] {} controllerPeriodic duration_us={} jitter_us={}", getName(), duration_us, interval_us);
+    SPDLOG_DEBUG("[timing] {} controllerPeriodic duration_us={} interval_us={}",
+                 getName(),
+                 m_lastControllerStartNs != 0
+                     ? static_cast<uint32_t>((mercury::get_monotonic_ns() - cp_start) / 1000ULL) : 0,
+                 0);
 }
 
 void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
@@ -198,12 +198,10 @@ void Legged::onMessage(std::shared_ptr<MESSAGE> message, TCallback callback) {
     std::string response;
     switch (message->type) {
     case MSG_ENABLE_SUBSYSTEM:
-        SPDLOG_INFO("[{}] Received MSG_ENABLE_SUBSYSTEM", getName());
         setEnable(true);
         response = getName() + " leg enabled by subsystem message";
         break;
     case MSG_DISABLE_SUBSYSTEM:
-        SPDLOG_INFO("[{}] Received MSG_DISABLE_SUBSYSTEM", getName());
         setEnable(false);
         response = getName() + " leg disabled by subsystem message";
         break;
@@ -255,8 +253,7 @@ void Legged::disabledInit() {
 }
 
 void Legged::autonomousInit() {
-    //SetTurningTolerance(0.25);
-    enable();
+    setEnable(true);
 }
 
 void Legged::teleopInit() {
@@ -338,15 +335,19 @@ void Legged::reboot() {
 }
 
 void Legged::setEnable(bool _enable) {
-    if (_enable && !m_isEnabled) {
+    if (_enable && !isEnabled()) {
         m_motorsFaultDisabled.store(false, std::memory_order_release);
+        // Reset responsiveness tracking so the first controllerPeriodic()
+        // after enable does not produce spurious "unresponsive" warnings
+        // before enable-feedback has arrived.
+        std::fill(m_motorResponsive.begin(), m_motorResponsive.end(), false);
         std::for_each(motors.begin(),motors.end(), [](const auto &motor) {
             motor->enableMotor();
         } );
         enable();
         SPDLOG_INFO("[{}] Leg  is Enabled.", baseId == 1 ? "Left" : "Right");
     }
-    else if (!_enable && m_isEnabled) {
+    else if (!_enable && isEnabled()) {
         std::for_each(motors.begin(),motors.end(), [](const auto &motor) {
             motor->disableMotor();
         });
@@ -355,18 +356,34 @@ void Legged::setEnable(bool _enable) {
     }
 }
 
-void Legged::disableAllMotorsOnce() {
+static const char* disableReasonString(int reason) {
+    switch (reason) {
+        case Legged::SHM_INVALID_MAGIC:
+            return "invalid SHM magic";
+        case Legged::SHM_VERSION_MISMATCH:
+            return "SHM version mismatch";
+        case Legged::SHM_LIFECYCLE_NOT_RUNNING:
+            return "SHM lifecycle not RUNNING";
+        case Legged::HEARTBEAT_STALE:
+            return "producer heartbeat stale";
+        case Legged::EMERGENCY_STOP_ACTIVE:
+            return "emergency_stop active";
+        case Legged::CMD_WRITE_IDX_INVALID:
+            return "invalid cmd_write_idx";
+        default:
+            return "unknown";
+    }
+}
+
+void Legged::disableAllMotorsOnce(int reason) {
     bool expected = false;
     if (m_motorsFaultDisabled.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         for (auto& motor : motors) {
             motor->disableMotor();
         }
-        SPDLOG_WARN("[{}] All motors disabled (fault shutdown).", getName());
+        SPDLOG_WARN("[{}] All motors disabled (fault shutdown): reason={} ({}).",
+                    getName(), reason, disableReasonString(reason));
     }
-}
-
-bool Legged::isEnabled() {
-    return m_isEnabled;
 }
 
 void Legged::setShmPointers(mercury::SharedMemoryLayout* shm,

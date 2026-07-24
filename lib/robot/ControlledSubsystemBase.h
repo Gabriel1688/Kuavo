@@ -57,9 +57,10 @@ public:
         if (m_entryThreadRunning) {
             struct sched_param param{};
             param.sched_priority = 90;
-            if (pthread_setschedparam(thread_id, SCHED_FIFO, &param) != 0) {
+            int ret = pthread_setschedparam(thread_id, SCHED_FIFO, &param);
+            if (ret != 0) {
                 SPDLOG_WARN("Leg thread: failed to set SCHED_FIFO/90: {}",
-                            strerror(errno));
+                            strerror(ret));
             } else {
                 SPDLOG_INFO("Leg thread: SCHED_FIFO priority 90");
             }
@@ -128,6 +129,17 @@ public:
     void resume() {
         m_pauseRequested.store(false, std::memory_order_release);
     }
+
+protected:
+    /**
+     * Marks the subsystem as ready for periodic execution.  Must be called
+     * at the end of the derived class constructor so the RT thread does not
+     * invoke the pure-virtual controllerPeriodic() before the vtable is
+     * fully installed.
+     */
+    void markReady() { m_ready.store(true, std::memory_order_release); }
+
+public:
 
     /**
      * Returns the most recent timestep.
@@ -214,9 +226,16 @@ private:
                 }
             }
 
-            // Execute controllerPeriodic() on schedule
+            // Execute controllerPeriodic() on schedule.
+            // Always run regardless of m_isEnabled so that observation
+            // (motor feedback staging) continues even while the subsystem
+            // is disabled.  The subclass gates actuation (MIT dispatch)
+            // internally using isEnabled().
+            // Guard on m_ready to prevent calling the pure virtual before
+            // the derived class constructor has finished.
             now = std::chrono::steady_clock::now();
-            if (now >= next_wake && m_isEnabled && !m_pauseRequested.load(std::memory_order_acquire)) {
+            if (now >= next_wake && m_ready.load(std::memory_order_acquire) &&
+                !m_pauseRequested.load(std::memory_order_acquire)) {
                 m_inControllerPeriodic.store(true, std::memory_order_release);
                 controllerPeriodic();
                 m_inControllerPeriodic.store(false, std::memory_order_release);
@@ -233,6 +252,7 @@ private:
     //units::second_t m_dt = Constants::kControllerPeriod;  //5ms
     int m_dt = 5;
     std::atomic<bool> m_isEnabled{false};
+    std::atomic<bool> m_ready{false};
     std::atomic<bool> m_entryThreadRunning{false};
     std::atomic<bool> m_pauseRequested{false};
     std::atomic<bool> m_inControllerPeriodic{false};

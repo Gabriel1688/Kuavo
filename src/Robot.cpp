@@ -43,11 +43,25 @@ void Robot::robotInit() {
     UdpServer::getInstance(0).setParamCache(&m_paramCache);
     UdpServer::getInstance(1).setParamCache(&m_paramCache);
 
-    // Attach to the producer's POSIX shared memory. The producer owns the
-    // SHM lifecycle; the consumer refuses to start without a valid region.
-    m_shm = tryAttachSharedMemory();
+    // Attach to the producer's POSIX shared memory. The controller is managed
+    // by the mercury-controller systemd service; poll until the SHM appears
+    // instead of exiting immediately on startup.
+    constexpr uint64_t kAttachRetryMs = 100;
+    constexpr uint64_t kAttachTimeoutMs = 30'000;  // 30 seconds
+    uint64_t elapsedMs = 0;
+    m_shm = nullptr;
+    while (!m_shm && elapsedMs < kAttachTimeoutMs) {
+        m_shm = tryAttachSharedMemory();
+        if (!m_shm) {
+            SPDLOG_INFO("Waiting for controller service SHM ({} ms / {} ms)...",
+                        elapsedMs, kAttachTimeoutMs);
+            usleep(kAttachRetryMs * 1000);
+            elapsedMs += kAttachRetryMs;
+        }
+    }
     if (!m_shm) {
-        SPDLOG_ERROR("Failed to attach to producer SHM — exiting");
+        SPDLOG_ERROR("Failed to attach to producer SHM after {} ms — exiting",
+                     kAttachTimeoutMs);
         std::exit(EXIT_FAILURE);
     }
     attachSharedMemory();
@@ -265,15 +279,9 @@ void Robot::robotPeriodic() {
     }
     m_lastRobotStartNs = rp_start;
 
-    if (m_mqtt) {
-        char buf[256];
-        int n = std::snprintf(buf, sizeof(buf),
-            R"([{"bn":"kuavo:robot:","n":"robotPeriodic","t":0,"v":%u,"u":"us"},{"n":"robotJitter","v":%u,"u":"us"},{"n":"cycle","v":%u}])",
-            robot_us, robot_jitter_us, static_cast<uint32_t>(m_cycle));
-        m_mqtt->publish_binary("robot/timing",
-                               reinterpret_cast<const uint8_t*>(buf),
-                               static_cast<size_t>(n), 0, false);
-    }
+    // Timing is now piggybacked through Composer batch via SensorData fields
+    // (leg_a/b_duration_us, leg_a/b_interval_us). No MQTT publish from
+    // real-time threads — avoids priority inversion on m_mqttMutex.
     SPDLOG_DEBUG("[timing] robotPeriodic cycle={} duration_us={} jitter_us={}", m_cycle, robot_us, robot_jitter_us);
 
     m_cycle++;

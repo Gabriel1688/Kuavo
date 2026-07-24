@@ -41,11 +41,8 @@ double Motor::getParam(int RID) const {
 }
 
 void Motor::setTempParam(int RID, int val) {
-    {
-        std::lock_guard<std::mutex> lock(m_paramMutex);
-        m_paramDict[RID] = val;
-    }
-    notify();
+    std::lock_guard<std::mutex> lock(m_paramMutex);
+    m_paramDict[RID] = val;
 }
 
 // State update methods
@@ -57,44 +54,8 @@ void Motor::updateState(int status, double q, double dq, double tau, int tmos, i
     m_stateTmos.store(tmos, std::memory_order_release);
     m_stateTrotor.store(trotor, std::memory_order_release);
     m_lastUpdateTime.store(mercury::get_monotonic_ns(), std::memory_order_release);
-    notify();
 }
 
-void Motor::prepareWait() {
-    std::lock_guard<std::mutex> lock(m_requestMutex);
-    m_completed = false;
-    m_requestPending = true;
-    SPDLOG_INFO("Motor[{}]::prepareWait called", m_deviceId);
-}
-
-bool Motor::waitResponse() {
-    auto t0 = std::chrono::steady_clock::now();
-    std::unique_lock<std::mutex> lock(m_requestMutex);
-    bool result = m_requestCv.wait_for(lock, std::chrono::milliseconds{200}, [this] { return m_completed; });
-    m_requestPending = false;
-    auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-
-    if (!result) {
-        SPDLOG_ERROR("Motor[{}]::wait_response TIMEOUT after {}us", m_deviceId, dt);
-    } else {
-        SPDLOG_INFO("Motor[{}]::wait_response OK after {}us", m_deviceId, dt);
-    }
-    return result;
-}
-
-void Motor::notify() {
-    {
-        std::lock_guard<std::mutex> lock(m_requestMutex);
-        if (!m_requestPending) {
-            SPDLOG_INFO("Motor[{}]::notify skipped (no pending request)", m_deviceId);
-            return;
-        }
-        m_completed = true;
-        SPDLOG_INFO("Motor[{}]::notify completing pending request", m_deviceId);
-    }
-    m_requestCv.notify_one();
-}
 
 StateResult Motor::parseMotorStateData(const std::vector<uint8_t> &data) {
     if (data.size() < 8) {
@@ -102,7 +63,7 @@ StateResult Motor::parseMotorStateData(const std::vector<uint8_t> &data) {
     }
 
     // Parse state data
-    uint8_t status = data[0] & 0x0f;//error status
+    uint8_t status = (data[0] >> 4) & 0x0f; // error status (upper nibble; lower nibble is canId)
     uint16_t q_uint = (static_cast<uint16_t>(data[1]) << 8) | data[2];
     uint16_t dq_uint = (static_cast<uint16_t>(data[3]) << 4) | (static_cast<uint16_t>(data[4]) >> 4);
     uint16_t tau_uint = (static_cast<uint16_t>(data[4] & 0xf) << 8) | data[5];
@@ -141,33 +102,25 @@ ParamResult Motor::parseMotorParamData(const std::vector<uint8_t> &data) {
 void Motor::enableMotor() {
     std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_enable_motor_t{});
-    prepareWait();
-    sendMessage(data, 8, 0, true);
-    waitResponse();
+    sendMessage(data, 8, 0, false);
 }
 
 void Motor::disableMotor() {
     std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_disable_motor_t{});
-    prepareWait();
-    sendMessage(data, 8, 0, true);
-    waitResponse();
+    sendMessage(data, 8, 0, false);
 }
 
 void Motor::setZeroCommand() {
     std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_set_zero_position_t{});
-    prepareWait();
-    sendMessage(data, 8, 0, true);
-    waitResponse();
+    sendMessage(data, 8, 0, false);
 }
 
 void Motor::clearMotorError() {
     std::lock_guard<std::mutex> txn(m_transactionMutex);
     dataframe_t data(dataframe_clear_error_t{});
-    prepareWait();
-    sendMessage(data, 8, 0, true);
-    waitResponse();
+    sendMessage(data, 8, 0, false);
 }
 
 void Motor::setMitControl(const MITParam &mit_param) {
@@ -202,9 +155,11 @@ void Motor::setMitControl(const MITParam &mit_param) {
         df.data[5] = static_cast<uint8_t>(kd_uint >> 4);
         df.data[6] = static_cast<uint8_t>(((kd_uint & 0xF) << 4) | ((tau_uint >> 8) & 0xF));
         df.data[7] = static_cast<uint8_t>(tau_uint & 0xFF);
-        prepareWait();
-        sendMessage(df, 8, 0, true);
-        waitResponse();
+        // Fire-and-forget: motor state feedback arrives asynchronously via
+        // UdpServer → Motor::callback() → updateState().
+        // No prepareWait()/waitResponse() — a 200ms CV wait in a 400Hz
+        // (2.5ms) control loop caused system-wide stalls and emergency stops.
+        sendMessage(df, 8, 0, false);
     }
 }
 
@@ -216,9 +171,7 @@ void Motor::setPosvelControl(const PosVelParam &posvel_param) {
     dataframe_t df;
     memcpy(df.data, &pb, sizeof(float));
     memcpy(df.data + 4, &vb, sizeof(float));
-    prepareWait();
-    sendMessage(df, 8, 0, true);
-    waitResponse();
+    sendMessage(df, 8, 0, false);
 }
 
 void Motor::getMotorStatus() {
@@ -227,9 +180,7 @@ void Motor::getMotorStatus() {
     data.updateMotorStatus.can_id = m_deviceId;
     data.updateMotorStatus.cmd[0] = 0xcc;
     data.updateMotorStatus.cmd[1] = 0;
-    prepareWait();
-    sendMessage(data, 8, CMD_API_GET_MOTOR_STATUS, true);
-    waitResponse();
+    sendMessage(data, 8, CMD_API_GET_MOTOR_STATUS, false);
 }
 
 void Motor::getRegParam(int RID) {
@@ -244,9 +195,11 @@ void Motor::getRegParam(int RID) {
     data.registerParam.can_id = m_deviceId;
     data.registerParam.cmd = 0x33;
     data.registerParam.reg_id = RID;
-    prepareWait();
-    sendMessage(data, 8, CMD_API_GET_MOTOR_PARAMETERS, true);
-    waitResponse();
+    // Fire-and-forget: response arrives asynchronously via
+    // UdpServer::dispatchMessage() → MotorParamCache (lock-free atomics).
+    // No prepareWait()/waitResponse() — avoids blocking setMitControl()
+    // in the 400 Hz leg thread which shares m_transactionMutex.
+    sendMessage(data, 8, CMD_API_GET_MOTOR_PARAMETERS, false);
 }
 
 void Motor::writeRegParam(int RID, int val) {
@@ -256,9 +209,7 @@ void Motor::writeRegParam(int RID, int val) {
     data.registerParam.cmd = 0x55;
     data.registerParam.reg_id = RID;
     //data.writeRegisterParam.data=val;
-    prepareWait();
-    sendMessage(data, 8, CMD_API_WRITE_MOTOR_PARAMETERS, true);
-    waitResponse();
+    sendMessage(data, 8, CMD_API_WRITE_MOTOR_PARAMETERS, false);
 }
 
 void Motor::saveRegParam(int RID) {
@@ -267,9 +218,7 @@ void Motor::saveRegParam(int RID) {
     data.registerParam.can_id = m_deviceId;
     data.registerParam.cmd = 0xaa;
     data.registerParam.reg_id = RID;
-    prepareWait();
-    sendMessage(data, 8, CMD_API_SAVE_MOTOR_PARAMETERS, true);
-    waitResponse();
+    sendMessage(data, 8, CMD_API_SAVE_MOTOR_PARAMETERS, false);
 }
 
 void Motor::callback(const uint8_t *msg, size_t size) {

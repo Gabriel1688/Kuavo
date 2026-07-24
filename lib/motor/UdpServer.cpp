@@ -67,9 +67,10 @@ void UdpServer::start() {
         } else {
             struct sched_param param{};
             param.sched_priority = 88;
-            if (pthread_setschedparam(m_threadId, SCHED_FIFO, &param) != 0) {
+            int ret = pthread_setschedparam(m_threadId, SCHED_FIFO, &param);
+            if (ret != 0) {
                 SPDLOG_WARN("UdpServer[{}]: failed to set SCHED_FIFO/88: {}",
-                            m_serverId, strerror(errno));
+                            m_serverId, strerror(ret));
             } else {
                 SPDLOG_INFO("UdpServer[{}]: SCHED_FIFO priority 88", m_serverId);
             }
@@ -230,7 +231,7 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
         if (itmap != m_frameIds.end()) {
             auto handle = itmap->second;
             m_frameIds.erase(itmap);// always consume the pending reply entry
-            SPDLOG_INFO("dispatchMessage: pending reply consumed for FrameId={:04x} handle={}", FrameId, handle);
+            SPDLOG_DEBUG("dispatchMessage: pending reply consumed for FrameId={:04x} handle={}", FrameId, handle);
             {
                 std::scoped_lock canLock(canHandlesMutex);
                 auto canIt = m_canHandles->find(handle);
@@ -245,7 +246,7 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
                 handler = subscriber->second.packetHandler;
             }
         } else {
-            SPDLOG_INFO("dispatchMessage: no pending reply for FrameId={:04x}, m_frameIds size={}", FrameId, m_frameIds.size());
+            SPDLOG_DEBUG("dispatchMessage: no pending reply for FrameId={:04x}, m_frameIds size={}", FrameId, m_frameIds.size());
         }
     }
 
@@ -289,26 +290,26 @@ void UdpServer::run() {
     struct epoll_event events[1];
     SPDLOG_INFO("UdpServer ::receiveTask is running.");
     while (!m_isClosed) {
-        int ready = epoll_wait(epfd, events, 1, -1);
+        int ready = epoll_wait(epfd, events, 1, 100 /* 100ms timeout */);
         if (ready < 0) {
             if (errno == EINTR)
                 continue;
             perror("epoll_wait error.");
             return;
-        } else {
-            for (int i = 0; i < ready; i++) {
-                if (events[i].data.fd == m_sockfd) {
-                    CANFrame frame;
-                    const size_t length = recvfrom(m_sockfd, (uint8_t *) &frame, sizeof(frame) - 1, 0, nullptr, nullptr);
-                    if (length < 1) {
-                        if (length == 0) {
-                            SPDLOG_INFO("receive empty package");
-                        } else {
-                            SPDLOG_ERROR("Failed to receive data {}", strerror(errno));
-                        }
+        }
+        if (ready == 0) continue; // timeout, no data
+        for (int i = 0; i < ready; i++) {
+            if (events[i].data.fd == m_sockfd) {
+                CANFrame frame;
+                const size_t length = recvfrom(m_sockfd, (uint8_t *) &frame, sizeof(frame) - 1, 0, nullptr, nullptr);
+                if (length < 1) {
+                    if (length == 0) {
+                        SPDLOG_INFO("receive empty package");
                     } else {
-                        dispatchMessage(frame, length);
+                        SPDLOG_ERROR("Failed to receive data {}", strerror(errno));
                     }
+                } else {
+                    dispatchMessage(frame, length);
                 }
             }
         }

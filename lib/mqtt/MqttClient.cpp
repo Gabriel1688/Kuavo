@@ -85,9 +85,10 @@ void MqttClient::start() {
     } else {
         struct sched_param param{};
         param.sched_priority = 0;
-        if (pthread_setschedparam(m_thrId, SCHED_OTHER, &param) != 0) {
+        int ret = pthread_setschedparam(m_thrId, SCHED_OTHER, &param);
+        if (ret != 0) {
             SPDLOG_WARN("MQTT Logger: failed to set SCHED_OTHER/0: {}",
-                        strerror(errno));
+                        strerror(ret));
         } else {
             SPDLOG_INFO("MQTT Logger: SCHED_OTHER priority 0");
         }
@@ -443,7 +444,7 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         break;
 
     case LWS_CALLBACK_MQTT_CLIENT_RX:
-        SPDLOG_INFO("MQTT_CLIENT_RX, topic=[{}]",
+        SPDLOG_INFO("MQTT_RX topic={}",
                      ((lws_mqtt_publish_param_t *)in)->topic);
         processMessage(in, len, wsi);
         return 0;
@@ -484,7 +485,7 @@ void MqttClient::processMessage(void *in, __attribute__((unused)) size_t len, __
     assert(pub_param);
 
     auto pp = reinterpret_cast<const uint8_t *>(pub_param->payload);
-    SPDLOG_INFO("[{}]: {:#04x}", pub_param->topic, fmt::join(pp, pp + pub_param->payload_len, " "));
+    SPDLOG_TRACE("[{}]: {:#04x}", pub_param->topic, fmt::join(pp, pp + pub_param->payload_len, " "));
 
     //TODO:: dispatch message according to the topic type.
     //if("FRC_ROBOT" == pub_param->topic)

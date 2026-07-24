@@ -35,7 +35,7 @@ imu:
   server_ip: 127.0.0.1
   local_port: 8890            # localPort  = base_local_port  + server_id * 2
   value_mode: float           # float or int
-  base_id: 514
+  base_id: 0x514
 
 # --- Motor ---
 motor:

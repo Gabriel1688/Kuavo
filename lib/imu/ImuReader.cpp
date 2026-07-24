@@ -56,9 +56,10 @@ void ImuReader::start() {
     } else {
         struct sched_param param{};
         param.sched_priority = 80;
-        if (pthread_setschedparam(m_threadId, SCHED_FIFO, &param) != 0) {
+        int ret = pthread_setschedparam(m_threadId, SCHED_FIFO, &param);
+        if (ret != 0) {
             SPDLOG_WARN("ImuReader: failed to set SCHED_FIFO/80: {}",
-                        strerror(errno));
+                        strerror(ret));
         } else {
             SPDLOG_INFO("ImuReader: SCHED_FIFO priority 80");
         }
@@ -118,13 +119,14 @@ void ImuReader::run() {
 
     struct epoll_event events[1];
     while (!m_shutdown.load(std::memory_order_relaxed)) {
-        int ready = epoll_wait(epfd, events, 1, -1 /*100ms timeout*/);
-        if (ready <= 0) {
+        int ready = epoll_wait(epfd, events, 1, 100 /* 100ms timeout */);
+        if (ready < 0) {
             if (errno == EINTR)
                 continue;
             SPDLOG_ERROR("ImuReader: epoll_wait error: {}", strerror(errno));
             break;
         }
+        if (ready == 0) continue; // timeout, no data
         // Drain all available frames
         for (;;) {
             ImuCanFrame frame;
@@ -138,7 +140,7 @@ void ImuReader::run() {
             }
 
             uint32_t canId = __builtin_bswap32(frame.canIdBE);
-
+            SPDLOG_TRACE("ImuReader: receive frame (0x{0:x} )", canId);
             // Filter: only accept [baseCanId .. baseCanId + numFrames)
             if (canId < static_cast<uint32_t>(m_baseId) ||
                 canId >= static_cast<uint32_t>(m_baseId) + static_cast<uint32_t>(m_numFrames))

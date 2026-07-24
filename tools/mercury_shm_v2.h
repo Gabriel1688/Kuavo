@@ -32,7 +32,7 @@ static constexpr int NUM_ACT_JOINT = 12;
 static constexpr int MOTORS_PER_GROUP = 6;
 static constexpr const char* SHM_NAME = "/mercury_robot_ipc";
 static constexpr uint32_t SHM_MAGIC = 0x4D455243; // "MERC"
-static constexpr uint32_t SHM_VERSION = 3;
+static constexpr uint32_t SHM_VERSION = 4;
 static constexpr uint64_t HEARTBEAT_STALE_NS = 100'000'000ULL;  // 100ms
 
 enum class ShmLifecycle : uint32_t {
@@ -132,6 +132,12 @@ struct SensorData {
     uint64_t imu_sequence;
     uint64_t motor_group_a_sequence;
     uint64_t motor_group_b_sequence;
+
+    // Per-leg controller timing (piggybacked from MotorGroupStageData)
+    uint32_t leg_a_duration_us;
+    uint32_t leg_a_interval_us;
+    uint32_t leg_b_duration_us;
+    uint32_t leg_b_interval_us;
 };
 
 struct Command {
@@ -141,7 +147,7 @@ struct Command {
     double kp[NUM_ACT_JOINT];           // Damiao Kp [0,500] [2]
     double kd[NUM_ACT_JOINT];           // Damiao Kd [0,5] [2]
     uint8_t control_mode[NUM_ACT_JOINT]; // 0=MIT,1=PosVel,2=Vel,3=PosForce [3]
-    uint8_t enabled[NUM_ACT_JOINT];     // 0xFC=enable,0xFD=disable [2]
+    uint8_t enabled[NUM_ACT_JOINT];     // nonzero=enable, 0=disable (controllers write 1/0)
     uint8_t _pad_cmd[8];               // Explicit padding
     uint64_t timestamp_ns;
     uint64_t sequence;
@@ -285,6 +291,10 @@ struct alignas(64) MotorGroupStageData {
     uint8_t _pad[2];
     int32_t mos_temperature[MOTORS_PER_GROUP];
     int32_t rotor_temperature[MOTORS_PER_GROUP];
+    // Controller timing (populated by leg thread, carried through Composer batch)
+    uint32_t controller_duration_us;   // controllerPeriodic execution time
+    uint32_t controller_interval_us;   // interval since last controllerPeriodic
+
     uint64_t timestamp_ns;
     uint64_t sequence;
 };

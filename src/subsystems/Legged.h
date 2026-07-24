@@ -55,6 +55,18 @@ public:
     Legged &operator=(const Legged &) = delete;
 
     /**
+     * Fault reasons passed to disableAllMotorsOnce().
+     */
+    enum DisableReason {
+        SHM_INVALID_MAGIC = 1,
+        SHM_VERSION_MISMATCH,
+        SHM_LIFECYCLE_NOT_RUNNING,
+        HEARTBEAT_STALE,
+        EMERGENCY_STOP_ACTIVE,
+        CMD_WRITE_IDX_INVALID
+    };
+
+    /**
      * Returns encoder displacement. unit<meter>
      */
     float getPosition() const;
@@ -235,14 +247,11 @@ private:
 
     void resting();
 
-    bool isEnabled();
-
-    void disableAllMotorsOnce();
+    void disableAllMotorsOnce(int reason);
 
     void setCommandMode(uint32_t _mode);
 
     std::vector<std::shared_ptr<Motor>> motors;
-    std::atomic<bool> m_isEnabled{false};
     std::atomic<bool> contact{false};
     int baseId = 0;
     int m_groupOffset = 0;  // Joint index offset: 0 for left, 6 for right
@@ -259,5 +268,4 @@ private:
 
     // Timing state
     uint64_t m_lastControllerStartNs = 0;
-    void logControllerTiming(uint64_t start_ns, uint64_t end_ns);
 };

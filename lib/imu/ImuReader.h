@@ -22,42 +22,33 @@
  * Default frame layout (standard output, 8 frames, 16 floats):
  * CAN ID    Offset    Slot-0             Slot-1
  * 0x514      +0      accX   (g)         accY   (g)
- * 0x515      +1      accZ   (g)         gyroX  (rad/s)
- * 0x516      +2      gyroY  (rad/s)     gyroZ  (rad/s)
- * 0x517      +3      magX   (uT)        magY   (uT)
- * 0x518      +4      magZ   (uT)        eulerX (rad)   [roll]
- * 0x519      +5      eulerY (rad)       eulerZ (rad)   [pitch, yaw]
- * 0x51a      +6      quatW              quatX
- * 0x51b      +7      quatY              quatZ
+ * 0x515      +1      accZ   (g)         eulerX (rad)   [roll]
+ * 0x518      +2      eulerY (rad)       eulerZ (rad)   [pitch, yaw]
+ * 0x519      +3      quatW              quatX
+ * 0x51a      +4      quatY              quatZ
  */
 
 class ImuReader {
 public:
-    /// Maximum sequential frames (address space per IMU = 8).
-    static constexpr int kMaxFrames = 8;
+    /// Maximum sequential frames (address space per IMU = 5).
+    static constexpr int kMaxFrames = 5;
     /// Two float32 values per CAN frame.
     static constexpr int kMaxFloats = kMaxFrames * 2;
     /// IMU update rate in Hz; used for incremental angle integration.
-    static constexpr double kRateHz = 500.0;
+    static constexpr double kRateHz = 200.0;
 
     // Named indices into the flat float array.
     enum Idx : int {
         ACC_X = 0,
         ACC_Y = 1,
         ACC_Z = 2,
-        GYRO_X = 3,
-        GYRO_Y = 4,
-        GYRO_Z = 5,
-        MAG_X = 6,
-        MAG_Y = 7,
-        MAG_Z = 8,
-        EULER_X = 9,
-        EULER_Y = 10,
-        EULER_Z = 11, // roll, pitch, yaw
-        QUAT_W = 12,
-        QUAT_X = 13,
-        QUAT_Y = 14,
-        QUAT_Z = 15,
+        EULER_X = 3,
+        EULER_Y = 4,
+        EULER_Z = 5, // roll, pitch, yaw
+        QUAT_W = 6,
+        QUAT_X = 7,
+        QUAT_Y = 8,
+        QUAT_Z = 9,
     };
 
     ImuReader();

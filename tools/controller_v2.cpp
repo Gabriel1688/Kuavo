@@ -7,7 +7,9 @@
  * Uses mercury_shm_v2.h — compatible with test_actuator_logger.
  *
  * Usage:
- *   ./test_controller_v2 [-freq 1000] [-dur 10] [-joints 12]
+ *   ./test_controller_v2 [-freq 200] [-dur 10] [-joints 12]
+ *
+ *   -dur 0 means run forever (until SIGINT/SIGTERM).
  */
 
 #include "mercury_shm_v2.h"
@@ -46,7 +48,7 @@ public:
         layout_ = static_cast<SharedMemoryLayout*>(ptr);
 
         // Initialize header (magic is written LAST as the release-acquire sentinel)
-        layout_->version = SHM_VERSION;  // v3 layout
+        layout_->version = SHM_VERSION;  // v4 layout
         layout_->num_joints = num_joints;
         layout_->control_freq_hz = control_freq;
         layout_->robot_id = 1;
@@ -75,9 +77,16 @@ public:
     }
 
     void run(double duration_seconds) {
-        printf("Running controller for %.1f seconds...\n\n", duration_seconds);
+        bool finite = (duration_seconds > 0.0);
+        if (finite) {
+            printf("Running controller for %.1f seconds...\n\n", duration_seconds);
+        } else {
+            printf("Running controller indefinitely (dur=0); press Ctrl-C to stop...\n\n");
+        }
 
-        uint64_t total_iterations = static_cast<uint64_t>(duration_seconds * control_freq_);
+        uint64_t total_iterations = finite
+            ? static_cast<uint64_t>(duration_seconds * control_freq_)
+            : UINT64_MAX;
         uint64_t iteration = 0;
         uint64_t missed_deadlines = 0;
 
@@ -97,7 +106,7 @@ public:
 
         uint64_t next_wakeup = get_monotonic_ns();
 
-        while (g_running && iteration < total_iterations) {
+        while (g_running && (duration_seconds <= 0 || iteration < total_iterations)) {
             uint64_t cycle_start = get_monotonic_ns();
 
             // ---- Generate sinusoidal trajectory ----
@@ -262,7 +271,7 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    uint32_t freq = 1000;
+    uint32_t freq = 200;
     double duration = 10.0;
     uint32_t joints = NUM_ACT_JOINT;
 
@@ -274,7 +283,7 @@ int main(int argc, char* argv[]) {
         else if (strcmp(argv[i], "-joints") == 0 && i + 1 < argc)
             joints = atoi(argv[++i]);
         else if (strcmp(argv[i], "-h") == 0) {
-            printf("Usage: %s [-freq Hz] [-dur sec] [-joints N]\n", argv[0]);
+            printf("Usage: %s [-freq Hz] [-dur sec (0=forever)] [-joints N]\n", argv[0]);
             return 0;
         }
     }

@@ -50,6 +50,15 @@ void* Composer::thread_entry(void* arg) {
 void Composer::start() {
     if (thread_created_) return;
 
+    // Initialize staleness timestamps to "now" so the system gets a grace
+    // period (equal to the respective timeout) before declaring sources stale.
+    // Without this, timestamps start at 0 → check_staleness() immediately
+    // returns UINT64_MAX elapsed ms → instant emergency stop on first cycle.
+    uint64_t now = get_monotonic_ns();
+    last_imu_change_ns_.store(now, std::memory_order_relaxed);
+    last_grp_a_change_ns_.store(now, std::memory_order_relaxed);
+    last_grp_b_change_ns_.store(now, std::memory_order_relaxed);
+
     running_.store(true, std::memory_order_release);
 
     pthread_attr_t attr;
@@ -69,9 +78,10 @@ void Composer::start() {
     // Apply SCHED_FIFO priority 85
     struct sched_param param{};
     param.sched_priority = SCHED_PRIORITY;
-    if (pthread_setschedparam(thread_id_, SCHED_FIFO, &param) != 0) {
+    int ret = pthread_setschedparam(thread_id_, SCHED_FIFO, &param);
+    if (ret != 0) {
         SPDLOG_WARN("Composer: failed to set SCHED_FIFO/{}: {}",
-                    SCHED_PRIORITY, strerror(errno));
+                    SCHED_PRIORITY, strerror(ret));
     } else {
         SPDLOG_INFO("Composer: SCHED_FIFO priority {}, 400 Hz, {}KiB stack",
                     SCHED_PRIORITY, STACK_SIZE / 1024);
@@ -174,6 +184,12 @@ void Composer::compose_cycle() {
     sd.imu_sequence               = imu.sequence;
     sd.motor_group_a_sequence     = grpA.sequence;
     sd.motor_group_b_sequence     = grpB.sequence;
+
+    // Per-leg controller timing (piggybacked from staging buffers)
+    sd.leg_a_duration_us  = grpA.controller_duration_us;
+    sd.leg_a_interval_us  = grpA.controller_interval_us;
+    sd.leg_b_duration_us  = grpB.controller_duration_us;
+    sd.leg_b_interval_us  = grpB.controller_interval_us;
 
     // 3. Update staleness tracking
     uint64_t now = sd.compose_timestamp_ns;

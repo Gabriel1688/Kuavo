@@ -109,12 +109,16 @@ private:
     bool thread_created_{false};
 
     // Per-source staleness tracking (updated each compose cycle)
+    // Timestamps initialized in start() to current monotonic time so the system
+    // gets a grace period before declaring sources stale on first boot.
     std::atomic<uint64_t> last_imu_change_ns_{0};
     std::atomic<uint64_t> last_grp_a_change_ns_{0};
     std::atomic<uint64_t> last_grp_b_change_ns_{0};
-    uint64_t prev_imu_seq_{0};
-    uint64_t prev_grp_a_seq_{0};
-    uint64_t prev_grp_b_seq_{0};
+    // Sequence sentinels: UINT64_MAX ensures the first real sequence (0 or 1)
+    // always triggers a timestamp update.
+    uint64_t prev_imu_seq_{UINT64_MAX};
+    uint64_t prev_grp_a_seq_{UINT64_MAX};
+    uint64_t prev_grp_b_seq_{UINT64_MAX};
 
     // Batch accumulator (local to composer thread, no synchronization needed)
     BatchLogRecord batch_{};
