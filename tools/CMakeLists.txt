@@ -7,7 +7,18 @@ add_executable(
         DriverStationModeThread.cpp
         main.cpp
 )
+target_include_directories(
+        DriverStation
+        PRIVATE
+        ${PROJECT_SOURCE_DIR}/lib
+        ${PROJECT_SOURCE_DIR}/include
+)
 
+target_link_libraries(
+        DriverStation
+        PRIVATE
+        framework
+)
 add_executable(
         PackageGenerator
         PackageGenerator.cpp
@@ -32,20 +43,6 @@ target_link_libraries(
         pthread
         rt
 )
-
-target_include_directories(
-        DriverStation
-        PRIVATE
-        ${PROJECT_SOURCE_DIR}/lib
-        ${PROJECT_SOURCE_DIR}/include
-)
-
-target_link_libraries(
-        DriverStation
-        PRIVATE
-        framework
-)
-
 add_executable(
         mercury_controller
         mercury_controller.cpp

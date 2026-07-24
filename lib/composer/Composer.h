@@ -9,8 +9,8 @@
  * and accumulates BatchLogRecords into a process-local SPSC ring buffer.
  *
  * Batching follows the proven pattern from test_actuator_logger.cpp:
- * accumulate BATCH_SIZE (20) sensor+command pairs per ring entry,
- * reducing MQTT messages from 400/s to ~20/s at 400Hz.
+ * accumulate BATCH_SIZE (4) sensor+command pairs per ring entry,
+ * reducing MQTT messages from 400/s to ~100/s at 400Hz.
  *
  * Thread: SCHED_FIFO priority 85, 256 KiB stack, 400 Hz (2.5 ms).
  */
@@ -24,7 +24,7 @@
 
 namespace mercury {
 
-/// SPSC ring capacity for batched records (256 batches * 20 samples = 5120 samples buffered)
+/// SPSC ring capacity for batched records (256 batches * 4 samples = 1024 samples buffered)
 static constexpr size_t BATCH_RING_CAPACITY = 256;
 
 class Composer {

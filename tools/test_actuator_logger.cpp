@@ -105,7 +105,7 @@ private:
 // Global State
 // ============================================================
 static SharedMemoryLayout* g_layout = nullptr;
-static SPSCRingBuffer<BatchLogRecord, 256> g_log_ring;  // 256 batches * 20 samples = 5120 samples buffered
+static SPSCRingBuffer<BatchLogRecord, 256> g_log_ring;  // 256 batches * 4 samples = 1024 samples buffered
 static MqttSendQueue g_mqtt_queue;
 static uint32_t g_robot_id = 1;
 static uint64_t g_records_published = 0;

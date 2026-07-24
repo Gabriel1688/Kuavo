@@ -164,6 +164,17 @@ void Config::load(const std::string &yamlPath) {
         }
     }
 
+    // ---- Data Logger --------------------------------------------------------
+    if (root["data_logger"]) {
+        auto dl = root["data_logger"];
+        if (dl["enabled"])
+            m_dataLogger.enabled = dl["enabled"].as<bool>();
+        if (dl["downsample_every"])
+            m_dataLogger.downsampleEvery = dl["downsample_every"].as<int>();
+        if (dl["ring_buffer_capacity"])
+            m_dataLogger.ringBufferCapacity = dl["ring_buffer_capacity"].as<int>();
+    }
+
     // ---- Driver Station ---------------------------------------------------------
     if (root["driver_station"]) {
         auto ds = root["driver_station"];

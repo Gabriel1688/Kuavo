@@ -83,6 +83,12 @@ public:
         int rotation = 3;
     };
 
+    struct DataLogger {
+        bool enabled = true;
+        int downsampleEvery = 5;
+        int ringBufferCapacity = 256;
+    };
+
     // --- Driver Station -------------------------------------------------------
     struct DriverStation {
         int udpPort = 61123;
@@ -98,6 +104,7 @@ public:
     const Imu &imu() const { return m_imu; }
     const Motor &motor() const { return m_motor; }
     const Logger &logger() const { return m_logger; }
+    const DataLogger &dataLogger() const { return m_dataLogger; }
     const DriverStation &driverStation() const { return m_driverStation; }
 
     /** Find a motor-type descriptor by name (e.g. "DM8009"). */
@@ -115,6 +122,7 @@ private:
     Imu m_imu;
     Motor m_motor;
     Logger m_logger;
+    DataLogger m_dataLogger;
     DriverStation m_driverStation;
 
     static std::string s_yamlPath;

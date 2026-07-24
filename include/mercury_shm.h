@@ -206,10 +206,10 @@ struct LogRecord {
 
 // ============================================================
 // Batch logging — accumulate N samples into one MQTT message
-// Reduces MQTT publish rate from 2000/s to ~100/s (at BATCH_SIZE=20)
+// Reduces MQTT publish rate from 2000/s to ~500/s (at BATCH_SIZE=4)
 // ============================================================
 
-static constexpr size_t BATCH_SIZE = 20;
+static constexpr size_t BATCH_SIZE = 4;
 
 struct SensorCommandPair {
     SensorData sensor;

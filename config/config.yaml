@@ -75,6 +75,7 @@ logger:
 
 data_logger:
   enabled: true
+  downsample_every: 5
   drain_batch_size: 10
   ring_buffer_capacity: 256
 

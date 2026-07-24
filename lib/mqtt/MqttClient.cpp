@@ -147,6 +147,7 @@ void MqttClient::run() {
     info.register_notifier_list = na;
     info.fd_limit_per_thread = 1 + 1 + 1;
     info.retry_and_idle_policy = &retry;
+    info.pt_serv_buf_size = 16 * 1024;  // fit full batched MQTT PUBLISH payload
     lws_set_log_level(LLL_USER | LLL_ERR | LLL_WARN, lws_spdlog_emit);
 
     m_context = lws_create_context(&info);

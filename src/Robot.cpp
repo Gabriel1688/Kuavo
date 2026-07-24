@@ -454,7 +454,8 @@ void Robot::attachSharedMemory() {
     m_mqtt = globalMqtt;
     if (globalMqtt) {
         m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
-                                                     static_cast<uint32_t>(Config::instance().mqtt().robotId));
+                                                     static_cast<uint32_t>(Config::instance().mqtt().robotId),
+                                                     static_cast<size_t>(Config::instance().dataLogger().downsampleEvery));
         m_logger->start();
         SPDLOG_INFO("Logger thread started");
     } else {
