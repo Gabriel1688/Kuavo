@@ -4,7 +4,6 @@
 #include "Common.h"
 #include "DmFrame.h"
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -97,6 +96,12 @@ public:
 
     void callback(const uint8_t *msg, size_t size);
 
+    // Static trampoline for function-pointer-based callback dispatch.
+    // Avoids std::function/std::bind overhead in the hot packet path.
+    static void packetTrampoline(void* ctx, const uint8_t* data, size_t len) {
+        static_cast<Motor*>(ctx)->callback(data, len);
+    }
+
     // State update methods
     void updateState(int status, double q, double dq, double tau, int tmos, int trotor);
     void setEnabled(bool enabled);
@@ -125,7 +130,7 @@ private:
     std::atomic<double> m_stateQ, m_stateDq, m_stateTau;
     std::atomic<int> m_stateTmos, m_stateTrotor;
     MITParam m_lastMitParam{};
-    std::chrono::steady_clock::time_point m_lastSendTime{};
+    uint64_t m_lastSendTimeNs{};  // CLOCK_MONOTONIC nanoseconds
     std::atomic<uint64_t> m_lastUpdateTime{};
 
     // Motor feedback parameters  --reserved.

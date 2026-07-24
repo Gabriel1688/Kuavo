@@ -3,7 +3,6 @@
 #include "common/Config.h"
 #include "composer/MotorParamCache.h"
 #include "spdlog/spdlog.h"
-#include <functional>
 #include <stdexcept>
 #include <string>
 #include <utility/Utility.h>
@@ -28,7 +27,8 @@ Motor::Motor(MotorType motor_type, uint32_t device_id, mercury::MotorParamCache*
       m_paramCache(param_cache) {
     m_canHandle = std::make_shared<CAN>(device_id);
     m_observer.wantedIP = Config::instance().motor().observerIp;
-    m_observer.packetHandler = std::bind(&Motor::callback, this, std::placeholders::_1, std::placeholders::_2);
+    m_observer.packetHandler = &Motor::packetTrampoline;
+    m_observer.packetCtx     = this;
     m_canHandle->registrateCallback(m_deviceId, m_observer);
 }
 
@@ -125,17 +125,16 @@ void Motor::clearMotorError() {
 
 void Motor::setMitControl(const MITParam &mit_param) {
     {
-        auto t0 = std::chrono::steady_clock::now();
+        uint64_t t0 = mercury::get_monotonic_ns();
         std::lock_guard<std::mutex> txn(m_transactionMutex);
-        auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - t0).count();
-        if (dt > 100) {
-            SPDLOG_WARN("Motor[{}]::setMitControl waited {}us for transaction mutex", m_deviceId, dt);
+        uint64_t dt_us = (mercury::get_monotonic_ns() - t0) / 1000ULL;
+        if (dt_us > 100) {
+            SPDLOG_WARN("Motor[{}]::setMitControl waited {}us for transaction mutex", m_deviceId, dt_us);
         }
         {
             std::lock_guard<std::mutex> lock(m_commandMutex);
             m_lastMitParam = mit_param;
-            m_lastSendTime = std::chrono::steady_clock::now();
+            m_lastSendTimeNs = mercury::get_monotonic_ns();
         }
         uint16_t kp_uint = utility::doubleToUint(mit_param.kp, 0, 500, 12);
         uint16_t kd_uint = utility::doubleToUint(mit_param.kd, 0, 5, 12);
@@ -184,12 +183,11 @@ void Motor::getMotorStatus() {
 }
 
 void Motor::getRegParam(int RID) {
-    auto t0 = std::chrono::steady_clock::now();
+    uint64_t t0 = mercury::get_monotonic_ns();
     std::lock_guard<std::mutex> txn(m_transactionMutex);
-    auto dt = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - t0).count();
-    if (dt > 100) {
-        SPDLOG_WARN("Motor[{}]::getRegParam waited {}us for transaction mutex", m_deviceId, dt);
+    uint64_t dt_us = (mercury::get_monotonic_ns() - t0) / 1000ULL;
+    if (dt_us > 100) {
+        SPDLOG_WARN("Motor[{}]::getRegParam waited {}us for transaction mutex", m_deviceId, dt_us);
     }
     dataframe_t data;
     data.registerParam.can_id = m_deviceId;

@@ -6,7 +6,6 @@
 #include <arpa/inet.h>
 #include <atomic>
 #include <errno.h>
-#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -38,17 +37,27 @@ struct CANFrame {
 
 class UdpServer {
 private:
+    // Maximum device ID (1-based). Array slots 0..MAX_DEVICE_ID are allocated;
+    // index 0 is unused. Device IDs 1..12 map directly to array indices.
+    static constexpr int MAX_DEVICE_ID = 12;
+
     int m_sockfd;
     std::atomic<bool> m_isClosed;
     sockaddr_in m_server;
     sockaddr_in m_clientLeft, m_clientRight;
-    std::map<int32_t, client_observer_t<uint8_t>> m_subscribers;
+
+    // Flat arrays indexed by device_id (1-based) for O(1) hot-path lookup.
+    // Replaces std::map<int32_t, client_observer_t<uint8_t>> m_subscribers
+    // and std::map<int, sockaddr_in*> m_deviceIPs.
+    client_observer_t<uint8_t> m_subscribers[MAX_DEVICE_ID + 1]{};
+    std::atomic<bool>          m_subscriberActive[MAX_DEVICE_ID + 1]{};
+    sockaddr_in*               m_deviceIPs[MAX_DEVICE_ID + 1]{};
+
     std::mutex m_subscribersMtx;
     pthread_t m_threadId;
     std::mutex m_frameIdsMutex;
     std::map<int32_t, HAL_CANHandle> m_frameIds;// keep the reply frameId and handle of device.
     std::map<HAL_CANHandle, std::shared_ptr<CANStorage>> *m_canHandles;
-    std::map<int, sockaddr_in *> m_deviceIPs;//IP address associate to specific CAN DeviceIds;
     mercury::MotorParamCache *m_paramCache = nullptr;
 
     void dispatchMessage(const CANFrame &frame, size_t msgSize);

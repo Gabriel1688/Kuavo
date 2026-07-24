@@ -29,14 +29,12 @@ void TimedRobot::startCompetition() {
         auto callback = m_callbacks.pop();
 
         // Sleep until the next callback is due
-        auto now = std::chrono::steady_clock::now();
-        std::chrono::microseconds currentTime =
-            std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+        uint64_t currentTime = monotonic_us();
 
         if (callback.m_expirationTime > currentTime) {
-            std::this_thread::sleep_for(callback.m_expirationTime - currentTime);
-            now = std::chrono::steady_clock::now();
-            currentTime = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+            uint64_t sleep_us = callback.m_expirationTime - currentTime;
+            std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+            currentTime = monotonic_us();
         }
 
         callback.m_func();
@@ -63,8 +61,7 @@ void TimedRobot::startCompetition() {
 
 TimedRobot::TimedRobot(int period) : IterativeRobotBase(period) {
     //    m_startTime = std::chrono::microseconds{RobotController::GetFPGATime()};
-    m_startTime = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch());
+    m_startTime = monotonic_us();
     addPeriodic([=, this] { loopFunc(); }, period);
     int32_t status = 0;
 }
@@ -79,6 +76,6 @@ TimedRobot::~TimedRobot() {
 void TimedRobot::addPeriodic(std::function<void()> callback, int period, int offset) {
     m_callbacks.emplace(callback,
                         m_startTime,
-                        std::chrono::microseconds{static_cast<int64_t>(period * 1e3)},
-                        std::chrono::microseconds{static_cast<int64_t>(offset * 1e3)});
+                        static_cast<uint64_t>(period * 1000),
+                        static_cast<uint64_t>(offset * 1000));
 }

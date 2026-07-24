@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <chrono>
+#include <ctime>
 #include <thread>
 
 /**
@@ -112,11 +113,10 @@ public:
      */
     void pause() {
         m_pauseRequested.store(true, std::memory_order_release);
-        auto start = std::chrono::steady_clock::now();
+        uint64_t start = monotonic_ns();
         while (m_inControllerPeriodic.load(std::memory_order_acquire)) {
             std::this_thread::yield();
-            auto now = std::chrono::steady_clock::now();
-            if (now - start > std::chrono::milliseconds(5)) {
+            if (monotonic_ns() - start > 5'000'000ULL) { // 5 ms
                 SPDLOG_ERROR("ControlledSubsystemBase::pause timeout");
                 break;
             }
@@ -185,6 +185,13 @@ private:
         return nullptr;
     }
 
+    // Helper: read CLOCK_MONOTONIC as nanoseconds (vDSO, ~20 ns).
+    static uint64_t monotonic_ns() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL + ts.tv_nsec;
+    }
+
     void Run() {
         struct pollfd item;
         item.fd = send_queue_.getFd();
@@ -196,14 +203,18 @@ private:
 
          //TODO:: change to 200Hz for real motor communication.
         // Use a high-resolution timer for 2.5ms (400Hz) periodic execution
-        auto next_wake = std::chrono::steady_clock::now();
-        static constexpr auto PERIOD = std::chrono::microseconds(2500);  // 2.5ms = 400Hz
+        static constexpr uint64_t PERIOD_NS = 2'500'000ULL;  // 2.5ms = 400Hz
+        uint64_t next_wake_ns = monotonic_ns();
 
         while (m_entryThreadRunning) {
             // Calculate time until next periodic tick
-            auto now = std::chrono::steady_clock::now();
-            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_wake - now);
-            int timeout_ms = remaining.count() > 0 ? static_cast<int>(remaining.count()) : 0;
+            uint64_t now_ns = monotonic_ns();
+            int timeout_ms = 0;
+            if (next_wake_ns > now_ns) {
+                // Convert remaining nanoseconds to milliseconds (round up to
+                // avoid waking too early)
+                timeout_ms = static_cast<int>((next_wake_ns - now_ns + 999'999ULL) / 1'000'000ULL);
+            }
 
             int rc = poll(&poll_items[0], poll_items.size(), timeout_ms);
             if (rc < 0 && errno != EINTR) {
@@ -233,16 +244,16 @@ private:
             // internally using isEnabled().
             // Guard on m_ready to prevent calling the pure virtual before
             // the derived class constructor has finished.
-            now = std::chrono::steady_clock::now();
-            if (now >= next_wake && m_ready.load(std::memory_order_acquire) &&
+            now_ns = monotonic_ns();
+            if (now_ns >= next_wake_ns && m_ready.load(std::memory_order_acquire) &&
                 !m_pauseRequested.load(std::memory_order_acquire)) {
                 m_inControllerPeriodic.store(true, std::memory_order_release);
                 controllerPeriodic();
                 m_inControllerPeriodic.store(false, std::memory_order_release);
-                next_wake += PERIOD;
+                next_wake_ns += PERIOD_NS;
                 // Catch up if we fell behind (avoid spiral)
-                if (next_wake < now) {
-                    next_wake = now + PERIOD;
+                if (next_wake_ns < now_ns) {
+                    next_wake_ns = now_ns + PERIOD_NS;
                 }
             }
 

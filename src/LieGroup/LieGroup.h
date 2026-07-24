@@ -32,7 +32,7 @@
 
 using namespace std;
 
-#include "../../../dummy/include/types.h"
+#include "../../include/types.h"
 
 class Vec2;
 

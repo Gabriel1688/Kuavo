@@ -1,7 +1,7 @@
 #ifndef SRLIB_TYPE
 #define SRLIB_TYPE
 
-#include <functional>
+#include <cstddef>
 #include <string>
 
 #define SRLIB_DOUBLE
@@ -73,7 +73,8 @@ typedef unsigned int UInt32;      //< 4 bytes integer 0 ~ 4294967255
 template<typename T>
 struct client_observer_t {
     std::string wantedIP = "";
-    std::function<void(const T *payload, size_t size)> packetHandler = nullptr;
+    void (*packetHandler)(void* ctx, const T* payload, size_t size) = nullptr;
+    void* packetCtx = nullptr;
 };
 
 // Sensor Message

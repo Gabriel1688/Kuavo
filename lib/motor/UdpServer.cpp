@@ -125,25 +125,33 @@ void UdpServer::sendMsg(CANFrameId frameId, const uint8_t *data, uint8_t dataSiz
 }
 
 void UdpServer::subscribe(const int32_t deviceId, const client_observer_t<uint8_t> &observer) {
+    if (deviceId < 0 || deviceId > MAX_DEVICE_ID) {
+        SPDLOG_ERROR("UdpServer::subscribe: deviceId {} out of range [1..{}]", deviceId, MAX_DEVICE_ID);
+        return;
+    }
     std::lock_guard<std::mutex> lock(m_subscribersMtx);
-    m_subscribers.insert(std::make_pair(deviceId, observer));
+    m_subscribers[deviceId] = observer;
+    m_subscriberActive[deviceId].store(true, std::memory_order_release);
 }
 
 sockaddr_in *UdpServer::getClientAddrByDeviceId(int deviceId) {
-    auto iter = m_deviceIPs.find(deviceId);
-    if (iter == m_deviceIPs.end()) {
+    if (deviceId < 0 || deviceId > MAX_DEVICE_ID || m_deviceIPs[deviceId] == nullptr) {
         SPDLOG_ERROR("Device with device ID {:d} does not exist", deviceId);
         return nullptr;
     }
-    return iter->second;
+    return m_deviceIPs[deviceId];
 }
 
 void UdpServer::bindDevicesToServer(int deviceId) {
+    if (deviceId < 0 || deviceId > MAX_DEVICE_ID) {
+        SPDLOG_ERROR("UdpServer::bindDevicesToServer: deviceId {} out of range [1..{}]", deviceId, MAX_DEVICE_ID);
+        return;
+    }
     std::lock_guard<std::mutex> lock(m_subscribersMtx);
     if (deviceId < Config::instance().motor().maxCanDevice) {
-        m_deviceIPs.insert(std::make_pair(deviceId, &m_clientLeft));
+        m_deviceIPs[deviceId] = &m_clientLeft;
     } else {
-        m_deviceIPs.insert(std::make_pair(deviceId, &m_clientRight));
+        m_deviceIPs[deviceId] = &m_clientRight;
     }
 }
 
@@ -223,7 +231,8 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
     }
 
     // Try pending reply lookup first (release lock before callback)
-    std::function<void(const uint8_t *, size_t)> handler;
+    void (*handler)(void*, const uint8_t*, size_t) = nullptr;
+    void* handler_ctx = nullptr;
     std::shared_ptr<CANStorage> storage;
     {
         std::scoped_lock lock(m_frameIdsMutex);
@@ -241,9 +250,11 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
                 }
                 storage = canIt->second;
             }
-            auto subscriber = m_subscribers.find(storage->deviceId);
-            if (subscriber != m_subscribers.end()) {
-                handler = subscriber->second.packetHandler;
+            auto devId = storage->deviceId;
+            if (devId >= 0 && devId <= MAX_DEVICE_ID &&
+                m_subscriberActive[devId].load(std::memory_order_acquire)) {
+                handler     = m_subscribers[devId].packetHandler;
+                handler_ctx = m_subscribers[devId].packetCtx;
             }
         } else {
             SPDLOG_DEBUG("dispatchMessage: no pending reply for FrameId={:04x}, m_frameIds size={}", FrameId, m_frameIds.size());
@@ -251,7 +262,7 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
     }
 
     if (handler) {
-        handler(frame.data, 8);
+        handler(handler_ctx, frame.data, 8);
         storage->replyEvent.set();
         auto pr = reinterpret_cast<const uint8_t *>(&frame);
         SPDLOG_TRACE("------> {:04x} : {:#04x}", frame.FrameId, fmt::join(pr, pr + 13, " "));
@@ -261,16 +272,14 @@ void UdpServer::dispatchMessage(const CANFrame &frame, size_t msgSize) {
     // No pending reply - deliver to subscriber by deriving deviceId from masterId
     // DAMIAO protocol: response CAN ID (masterId) = deviceId + 0x10
     int32_t derivedDeviceId = static_cast<int32_t>(FrameId) - 0x10;
-    {
-        std::lock_guard<std::mutex> lock(m_subscribersMtx);
-        auto subscriber = m_subscribers.find(derivedDeviceId);
-        if (subscriber != m_subscribers.end()) {
-            handler = subscriber->second.packetHandler;
-        }
+    if (derivedDeviceId >= 0 && derivedDeviceId <= MAX_DEVICE_ID &&
+        m_subscriberActive[derivedDeviceId].load(std::memory_order_acquire)) {
+        handler     = m_subscribers[derivedDeviceId].packetHandler;
+        handler_ctx = m_subscribers[derivedDeviceId].packetCtx;
     }
 
     if (handler) {
-        handler(frame.data, 8);
+        handler(handler_ctx, frame.data, 8);
         auto pr = reinterpret_cast<const uint8_t *>(&frame);
         SPDLOG_TRACE("unsolicited --> {:04x} : {:#04x}", frame.FrameId, fmt::join(pr, pr + 13, " "));
     } else {

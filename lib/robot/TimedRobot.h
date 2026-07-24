@@ -3,6 +3,7 @@
 #include "IterativeRobotBase.h"
 #include "common/priority_queue.h"
 #include <chrono>
+#include <ctime>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -53,22 +54,30 @@ public:
     void endCompetition();
 
 private:
+    /// Read CLOCK_MONOTONIC as microseconds (vDSO, ~20 ns).
+    static uint64_t monotonic_us() {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<uint64_t>(ts.tv_sec) * 1'000'000ULL
+             + static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
+    }
+
     class Callback {
     public:
         std::function<void()> m_func;
-        std::chrono::microseconds m_period;
-        std::chrono::microseconds m_expirationTime;
+        uint64_t m_period;          // microseconds
+        uint64_t m_expirationTime;  // microseconds (CLOCK_MONOTONIC)
 
         /**
          * Construct a callback container.
          *
          * @param func      The callback to run.
-         * @param startTime The common starting point for all callback scheduling.
-         * @param period    The period at which to run the callback.
-         * @param offset    The offset from the common starting time.
+         * @param startTime The common starting point for all callback scheduling (us).
+         * @param period    The period at which to run the callback (us).
+         * @param offset    The offset from the common starting time (us).
          */
-        Callback(std::function<void()> func, std::chrono::microseconds startTime,
-                 std::chrono::microseconds period, std::chrono::microseconds offset)
+        Callback(std::function<void()> func, uint64_t startTime,
+                 uint64_t period, uint64_t offset)
             : m_func{std::move(func)},
               m_period{period},
               m_expirationTime(startTime + offset + period) {}
@@ -78,7 +87,7 @@ private:
         }
     };
 
-    std::chrono::microseconds m_startTime;
+    uint64_t m_startTime;  // microseconds (CLOCK_MONOTONIC)
     uint64_t m_loopStartTimeUs = 0;
 
     priority_queue<Callback, std::vector<Callback>, std::greater<Callback>> m_callbacks;
