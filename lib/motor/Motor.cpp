@@ -1,4 +1,5 @@
 #include "Motor.h"
+#include "../../include/mercury_shm.h"
 #include "common/Config.h"
 #include "composer/MotorParamCache.h"
 #include "spdlog/spdlog.h"
@@ -6,7 +7,6 @@
 #include <stdexcept>
 #include <string>
 #include <utility/Utility.h>
-#include "../tools/mercury_shm_v2.h"
 
 namespace {
 // RID-to-MotorParamCache mapping. Values must be confirmed against the

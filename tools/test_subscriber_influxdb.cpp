@@ -19,13 +19,13 @@
  *       -influx_token mytoken
  */
 
-#include "mercury_shm_v2.h"
+#include "../include/mercury_shm.h"
 
-#include <libwebsockets.h>
-#include <curl/curl.h>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <curl/curl.h>
+#include <libwebsockets.h>
 #include <mutex>
 #include <sstream>
 #include <string>

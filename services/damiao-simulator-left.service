@@ -1,0 +1,23 @@
+[Unit]
+Description=Damiao multi-motor simulator (left leg)
+Documentation=https://github.com/cognition-x/Kuavo/blob/main/services/damiao-simulator
+After=network.target
+
+[Service]
+Type=simple
+# The simulator binary and runtime arguments can be overridden via
+# Environment= lines below or by dropping a file into
+# /etc/systemd/system/damiao-simulator-left.service.d/.
+Environment="DAMIAO_SIMULATOR=/usr/local/bin/DamiaoSimulator"
+Environment="DAMIAO_SIMULATOR_IDS=1,2,3,4,5,6"
+Environment="DAMIAO_SIMULATOR_LOCAL=8886"
+Environment="DAMIAO_SIMULATOR_REMOTE=8887"
+ExecStart=/usr/local/bin/damiao-simulator
+Restart=on-failure
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

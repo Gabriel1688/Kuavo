@@ -1,0 +1,24 @@
+[Unit]
+Description=LPMS-IG1 IMU simulator
+Documentation=https://github.com/cognition-x/Kuavo/blob/main/services/imu-simulator
+After=network.target
+
+[Service]
+Type=simple
+# The simulator binary path and runtime arguments can be overridden via
+# Environment= lines below or by dropping a file into
+# /etc/systemd/system/imu-simulator.service.d/.
+Environment="IMU_SIMULATOR=/usr/local/bin/ImuSimulator"
+Environment="IMU_SIMULATOR_FREQ=200"
+Environment="IMU_SIMULATOR_BASE=0x514"
+Environment="IMU_SIMULATOR_LOCAL=8891"
+Environment="IMU_SIMULATOR_REMOTE=8890"
+ExecStart=/usr/local/bin/imu-simulator
+Restart=on-failure
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

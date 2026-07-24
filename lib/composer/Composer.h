@@ -15,8 +15,8 @@
  * Thread: SCHED_FIFO priority 85, 256 KiB stack, 400 Hz (2.5 ms).
  */
 
+#include "../../include/mercury_shm.h"
 #include "MotorParamCache.h"
-#include "../../tools/mercury_shm_v2.h"
 
 #include <atomic>
 #include <cstdint>

@@ -1,5 +1,5 @@
 /**
- * @file controller_v2.cpp
+ * @file mercury_controller.cpp
  * @brief Whole-body controller test — multi-source aware (v2 SHM layout)
  *
  * Reads the composed SensorData (merged from 3 sources by the composer).
@@ -7,12 +7,12 @@
  * Uses mercury_shm_v2.h — compatible with test_actuator_logger.
  *
  * Usage:
- *   ./test_controller_v2 [-freq 200] [-dur 10] [-joints 12]
+ *   ./mercury_controller [-freq 200] [-dur 10] [-joints 12]
  *
  *   -dur 0 means run forever (until SIGINT/SIGTERM).
  */
 
-#include "mercury_shm_v2.h"
+#include "../include/mercury_shm.h"
 
 #include <cmath>
 #include <csignal>
@@ -20,8 +20,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <thread>
+#include <unistd.h>
 
 using namespace mercury;
 

@@ -1,4 +1,5 @@
 #include "Legged.h"
+#include "../../include/mercury_shm.h"
 #include "Eigen/Core"
 #include "common/Config.h"
 #include "ds/DriverStation.h"
@@ -8,9 +9,8 @@
 #include "robot/RobotBase.h"
 #include "spdlog/sinks/rotating_file_sink.h"// For size-based rotation
 #include "spdlog/spdlog.h"
-#include <unistd.h>
 #include <cstdio>
-#include "../tools/mercury_shm_v2.h"
+#include <unistd.h>
 //TODO:: how to get the contact state from the gamepad?
 //TODO:: refactor the base class of subsystem.
 

@@ -1,0 +1,31 @@
+#!/bin/bash
+# IMU simulator service wrapper
+#
+# Usage:
+#   imu-simulator
+#
+# Environment variables:
+#   IMU_SIMULATOR       path to the IMU simulator binary
+#                       (default: /usr/local/bin/ImuSimulator)
+#   IMU_SIMULATOR_FREQ  streaming frequency in Hz (default: 200)
+#   IMU_SIMULATOR_BASE  CAN base ID in hex (default: 0x514)
+#   IMU_SIMULATOR_LOCAL local UDP port to bind (default: 8891)
+#   IMU_SIMULATOR_REMOTE remote UDP port to send feedback to (default: 8890)
+#
+# The systemd unit file imu-simulator.service installs this wrapper as
+# /usr/local/bin/imu-simulator and starts it automatically at boot.
+
+set -e
+
+BIN="${IMU_SIMULATOR:-/usr/local/bin/ImuSimulator}"
+FREQ="${IMU_SIMULATOR_FREQ:-200}"
+BASE="${IMU_SIMULATOR_BASE:-0x514}"
+LOCAL="${IMU_SIMULATOR_LOCAL:-8891}"
+REMOTE="${IMU_SIMULATOR_REMOTE:-8890}"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: IMU simulator binary not found or not executable: $BIN" >&2
+    exit 1
+fi
+
+exec "$BIN" -freq "$FREQ" -base_id "$BASE" -local "$LOCAL" -remote "$REMOTE"

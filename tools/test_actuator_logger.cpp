@@ -19,23 +19,23 @@
  *   ./test_actuator_logger -broker 192.168.1.100 -port 1883 -dur 10
  */
 
-#include "mercury_shm_v2.h"
+#include "../include/mercury_shm.h"
 
-#include <libwebsockets.h>
 #include <arpa/inet.h>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <libwebsockets.h>
+#include <mutex>
 #include <netinet/in.h>
+#include <queue>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
-#include <mutex>
-#include <queue>
 
 using namespace mercury;
 

@@ -1,0 +1,32 @@
+#!/bin/bash
+# Damiao multi-motor simulator service wrapper
+#
+# Usage:
+#   damiao-simulator
+#
+# Environment variables:
+#   DAMIAO_SIMULATOR       path to the simulator binary
+#                          (default: /usr/local/bin/DamiaoSimulator)
+#   DAMIAO_SIMULATOR_IDS   comma-separated motor IDs
+#                          (default: 1,2,3,4,5,6)
+#   DAMIAO_SIMULATOR_LOCAL local UDP port to bind
+#                          (default: 8886)
+#   DAMIAO_SIMULATOR_REMOTE remote UDP port to send feedback to
+#                          (default: 8887)
+#
+# The systemd unit file damiao-simulator.service installs this wrapper as
+# /usr/local/bin/damiao-simulator and starts it automatically at boot.
+
+set -e
+
+BIN="${DAMIAO_SIMULATOR:-/usr/local/bin/DamiaoSimulator}"
+IDS="${DAMIAO_SIMULATOR_IDS:-1,2,3,4,5,6}"
+LOCAL="${DAMIAO_SIMULATOR_LOCAL:-8886}"
+REMOTE="${DAMIAO_SIMULATOR_REMOTE:-8887}"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: simulator binary not found or not executable: $BIN" >&2
+    exit 1
+fi
+
+exec "$BIN" -ids "$IDS" -local "$LOCAL" -remote "$REMOTE"

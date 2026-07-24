@@ -2,7 +2,7 @@
  * @file test_shm_lifecycle.cpp
  * @brief Integration tests 6.4-6.6: SHM producer lifecycle scenarios
  *
- * Launches the real test_controller_v2 producer as a child process and
+ * Launches the real mercury_controller producer as a child process and
  * validates consumer-side SHM state transitions for:
  *   6.4  Graceful shutdown (SIGTERM)
  *   6.5  Crash (kill -9) — heartbeat must go stale within 100 ms
@@ -10,13 +10,13 @@
  *         until explicit setEnable(true)
  *
  * Usage:
- *   ./test_shm_lifecycle [path/to/test_controller_v2]
+ *   ./test_shm_lifecycle [path/to/mercury_controller]
  *
  * The default producer path is the sibling binary built in the same
  * directory as this test.
  */
 
-#include "mercury_shm_v2.h"
+#include "../include/mercury_shm.h"
 
 #include <cerrno>
 #include <csignal>
@@ -129,7 +129,7 @@ static pid_t launch_producer(const char* producer_path) {
         // Child — redirect stdout/stderr to /dev/null to keep test output clean
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, STDOUT_FILENO); dup2(devnull, STDERR_FILENO); close(devnull); }
-        execl(producer_path, "test_controller_v2",
+        execl(producer_path, "mercury_controller",
               "-freq", "200", "-dur", "1000", "-joints", "12", nullptr);
         perror("execl");
         _exit(127);
@@ -520,8 +520,8 @@ int main(int argc, char* argv[]) {
         static char default_path[512];
         // Try common build directory locations
         const char* candidates[] = {
-            "./test_controller_v2",
-            "../tools/test_controller_v2",
+            "./mercury_controller",
+            "../tools/mercury_controller",
             nullptr
         };
         for (int i = 0; candidates[i]; i++) {
@@ -531,8 +531,8 @@ int main(int argc, char* argv[]) {
             }
         }
         if (!producer_path) {
-            fprintf(stderr, "Usage: %s [path/to/test_controller_v2]\n", argv[0]);
-            fprintf(stderr, "Could not find test_controller_v2 in common locations.\n");
+            fprintf(stderr, "Usage: %s [path/to/mercury_controller]\n", argv[0]);
+            fprintf(stderr, "Could not find mercury_controller in common locations.\n");
             return 1;
         }
     }

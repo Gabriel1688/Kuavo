@@ -4,16 +4,22 @@
 #include "../src/subsystems/Legged.h"
 #include "Constants.h"
 #include "common/Config.h"
+#include "composer/Composer.h"
+#include "composer/MotorParamCache.h"
 #include "ds/BooleanEvent.h"
 #include "ds/EventLoop.h"
 #include "ds/GenericHID.h"
 #include "ds/XboxController.h"
+#include "logger/Logger.h"
+#include "mercury_shm.h"
+#include "mqtt/MqttClient.h"
 #include "robot/TimedRobot.h"
 #include "spdlog/cfg/env.h"
 #include "spdlog/fmt/ostr.h"
 #include "spdlog/spdlog.h"
 #include <assert.h>
 #include <chrono>
+#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <pthread.h>
@@ -21,12 +27,6 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <fcntl.h>
-#include "../tools/mercury_shm_v2.h"
-#include "composer/Composer.h"
-#include "composer/MotorParamCache.h"
-#include "logger/Logger.h"
-#include "mqtt/MqttClient.h"
 
 using namespace spdlog;
 

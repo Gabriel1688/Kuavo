@@ -1,0 +1,29 @@
+#!/bin/bash
+# Mercury controller service wrapper
+#
+# Usage:
+#   mercury-controller
+#
+# Environment variables:
+#   MERCURY_CONTROLLER       path to the controller binary
+#                            (default: /usr/local/bin/mercury_controller)
+#   MERCURY_CONTROLLER_FREQ  control frequency in Hz (default: 200)
+#   MERCURY_CONTROLLER_DUR   maximum run duration in seconds (default: 100000)
+#   MERCURY_CONTROLLER_JOINTS number of joints (default: 12)
+#
+# The systemd unit file mercury-controller.service installs this wrapper as
+# /usr/local/bin/mercury-controller and starts it automatically at boot.
+
+set -e
+
+BIN="${MERCURY_CONTROLLER:-/usr/local/bin/mercury_controller}"
+FREQ="${MERCURY_CONTROLLER_FREQ:-200}"
+DUR="${MERCURY_CONTROLLER_DUR:-100000}"
+JOINTS="${MERCURY_CONTROLLER_JOINTS:-12}"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: controller binary not found or not executable: $BIN" >&2
+    exit 1
+fi
+
+exec "$BIN" -freq "$FREQ" -dur "$DUR" -joints "$JOINTS"
