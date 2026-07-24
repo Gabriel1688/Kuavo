@@ -192,8 +192,9 @@ void ImuReader::run() {
                     m_accumulator.imu_inc[i] = m_accumulator.imu_ang_vel[i] * dt;
                 }
 
-                if (m_stage) {
-                    m_stage->publish(m_accumulator);
+                auto* stage = m_stage.load(std::memory_order_acquire);
+                if (stage) {
+                    stage->publish(m_accumulator);
                 } else {
                     SPDLOG_TRACE("ImuReader: staging buffer not set, skipping publish");
                 }

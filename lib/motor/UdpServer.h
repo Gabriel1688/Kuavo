@@ -41,8 +41,9 @@ private:
     // index 0 is unused. Device IDs 1..12 map directly to array indices.
     static constexpr int MAX_DEVICE_ID = 12;
 
-    int m_sockfd;
-    std::atomic<bool> m_isClosed;
+    int m_sockfd = -1;
+    std::atomic<bool> m_isClosed{true};   // true until init() succeeds
+    bool m_threadStarted = false;         // true after pthread_create succeeds
     sockaddr_in m_server;
     sockaddr_in m_clientLeft, m_clientRight;
 
@@ -118,7 +119,7 @@ public:
     void bindDevicesToServer(int deviceId);
     sockaddr_in *getClientAddrByDeviceId(int deviceId);
     bool close();
-    ~UdpServer() = default;
+    ~UdpServer() { close(); }
 
     // Map to store different instances using smart pointers
     static std::map<int, std::unique_ptr<UdpServer>> instances_;

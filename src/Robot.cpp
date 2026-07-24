@@ -136,23 +136,18 @@ void Robot::robotInit() {
     });
 }
 Robot::~Robot() {
-    // Shutdown Logger thread before Composer to stop publishing
-    if (m_logger) {
-        m_logger->shutdown();
-        m_logger.reset();
-    }
+    // detachSharedMemory() stops all threads that touch SHM (IMU, legs),
+    // clears pointers, shuts down Logger & Composer, then munmaps.
+    // This must happen before member destructors run, otherwise leg threads
+    // would still be accessing unmapped memory.
+    detachSharedMemory();
 
-    // Shutdown Composer thread before unmapping SHM
-    if (m_composer) {
-        m_composer->shutdown();
-        m_composer.reset();
-    }
-
-    // Clean up shared memory mapping
-    if (m_shm) {
-        munmap(m_shm, sizeof(mercury::SharedMemoryLayout));
-        m_shm = nullptr;
-    }
+    // Stop UDP server threads before Robot members (Legged, MotorParamCache)
+    // are destroyed.  UdpServer instances are static singletons — their
+    // static-destruction order relative to Robot is undefined, and their
+    // receive threads reference subscribers owned by Legged.
+    UdpServer::getInstance(0).close();
+    UdpServer::getInstance(1).close();
 }
 
 void Robot::autonomousInit() {
@@ -384,29 +379,30 @@ void Robot::detachSharedMemory() {
 
     SPDLOG_INFO("Detaching from SHM {} (m_shm={})", mercury::SHM_NAME, reinterpret_cast<uintptr_t>(m_shm));
 
-    // Save pointer for deferred munmap; clear m_shm FIRST so leg threads
-    // and robotPeriodic() stop dereferencing it before we unmap.
+    // Save pointer for deferred munmap.
     auto* shm_to_unmap = m_shm;
     m_shm = nullptr;
 
+    // ---- Stop ALL threads that touch SHM BEFORE munmap ----
+
+    // 1. Stop the IMU reader thread (joins).
+    imu_subsystem.stop();
+
+    // 2. Stop leg RT threads (joins — waits for controllerPeriodic() to finish
+    //    and the thread to exit, so no thread can dereference the SHM pointer
+    //    after this point).
     leftLeg.setEnable(false);
     rightLeg.setEnable(false);
-    leftLeg.pause();
-    rightLeg.pause();
+    leftLeg.stopThread();
+    rightLeg.stopThread();
 
-    // Clear subsystem SHM pointers while threads are paused
+    // 3. Clear subsystem SHM pointers (threads are stopped, no races).
     leftLeg.setShmPointers(nullptr, nullptr);
     rightLeg.setShmPointers(nullptr, nullptr);
     imu_subsystem.setStagingBuffer(nullptr);
 
-    // Resume leg threads (they will see m_shm==null and return immediately)
-    leftLeg.resume();
-    rightLeg.resume();
-
-    imu_subsystem.stop();
-
-    // Shutdown Logger before Composer (Logger drains from the ring that
-    // Composer writes to)
+    // 4. Shutdown Logger before Composer (Logger drains from the ring that
+    //    Composer writes to).
     if (m_logger) {
         m_logger->shutdown();
         m_logger.reset();
@@ -416,7 +412,7 @@ void Robot::detachSharedMemory() {
         m_composer.reset();
     }
 
-    // Now safe to unmap — no threads hold references to shm_to_unmap
+    // 5. Now safe to unmap — no threads hold references to shm_to_unmap.
     munmap(shm_to_unmap, sizeof(mercury::SharedMemoryLayout));
     SPDLOG_INFO("SHM detached and unmapped");
     m_imu_stale_counter = 0;
@@ -430,15 +426,12 @@ void Robot::attachSharedMemory() {
     imu_subsystem.setStagingBuffer(&m_shm->imu_stage);
     imu_subsystem.start();
 
-    // Pause leg threads while we inject new SHM pointers
-    leftLeg.pause();
-    rightLeg.pause();
-
+    // Set SHM pointers while threads are stopped (no races), then restart.
     leftLeg.setShmPointers(m_shm, &m_shm->motor_group_a_stage);
     rightLeg.setShmPointers(m_shm, &m_shm->motor_group_b_stage);
 
-    leftLeg.resume();
-    rightLeg.resume();
+    leftLeg.startThread();
+    rightLeg.startThread();
 
     m_composer = std::make_unique<mercury::Composer>(
         m_shm->imu_stage,

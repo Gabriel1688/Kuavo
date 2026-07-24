@@ -79,10 +79,50 @@ public:
     ControlledSubsystemBase &operator=(ControlledSubsystemBase &&) = default;
 
     ~ControlledSubsystemBase() override {
+        stopThread();
+    }
+
+    /**
+     * Stops the RT thread and joins it.  Safe to call multiple times.
+     * Derived destructors MUST call this before destroying any state that
+     * controllerPeriodic() depends on, so the thread exits while the
+     * derived vtable is still installed.
+     */
+    void stopThread() {
         bool wasRunning = m_entryThreadRunning.exchange(false);
         if (wasRunning) {
             void *res;
             pthread_join(thread_id, &res);
+        }
+    }
+
+    /**
+     * Restarts the RT thread after a stopThread() call.
+     * No-op if the thread is already running.
+     */
+    void startThread() {
+        if (m_entryThreadRunning.load(std::memory_order_acquire))
+            return;  // already running
+        m_entryThreadRunning.store(true, std::memory_order_release);
+        m_pauseRequested.store(false, std::memory_order_release);
+
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 256 * 1024);
+        if (pthread_create(&thread_id, &attr, EntryOfThread, this) != 0) {
+            m_entryThreadRunning.store(false, std::memory_order_release);
+            SPDLOG_ERROR("startThread: failed to recreate RT thread.");
+        }
+        pthread_attr_destroy(&attr);
+
+        if (m_entryThreadRunning.load(std::memory_order_acquire)) {
+            struct sched_param param{};
+            param.sched_priority = 90;
+            int ret = pthread_setschedparam(thread_id, SCHED_FIFO, &param);
+            if (ret != 0) {
+                SPDLOG_WARN("startThread: failed to set SCHED_FIFO/90: {}",
+                            strerror(ret));
+            }
         }
     }
 
@@ -245,15 +285,23 @@ private:
             // Guard on m_ready to prevent calling the pure virtual before
             // the derived class constructor has finished.
             now_ns = monotonic_ns();
-            if (now_ns >= next_wake_ns && m_ready.load(std::memory_order_acquire) &&
-                !m_pauseRequested.load(std::memory_order_acquire)) {
+            if (now_ns >= next_wake_ns && m_ready.load(std::memory_order_acquire)) {
+                // Set m_inControllerPeriodic BEFORE checking m_pauseRequested
+                // so that pause() spinning on m_inControllerPeriodic will see
+                // "true" and wait for us, closing the race window where pause()
+                // could return while we are about to enter controllerPeriodic().
                 m_inControllerPeriodic.store(true, std::memory_order_release);
-                controllerPeriodic();
-                m_inControllerPeriodic.store(false, std::memory_order_release);
-                next_wake_ns += PERIOD_NS;
-                // Catch up if we fell behind (avoid spiral)
-                if (next_wake_ns < now_ns) {
-                    next_wake_ns = now_ns + PERIOD_NS;
+                if (m_pauseRequested.load(std::memory_order_acquire)) {
+                    // Caller requested pause — do NOT run controllerPeriodic().
+                    m_inControllerPeriodic.store(false, std::memory_order_release);
+                } else {
+                    controllerPeriodic();
+                    m_inControllerPeriodic.store(false, std::memory_order_release);
+                    next_wake_ns += PERIOD_NS;
+                    // Catch up if we fell behind (avoid spiral)
+                    if (next_wake_ns < now_ns) {
+                        next_wake_ns = now_ns + PERIOD_NS;
+                    }
                 }
             }
 

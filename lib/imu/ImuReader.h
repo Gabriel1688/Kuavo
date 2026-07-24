@@ -65,7 +65,7 @@ public:
 
     /// Inject the lock-free staging buffer before start().
     void setStagingBuffer(mercury::SourceDoubleBuffer<mercury::ImuStageData> *ptr) {
-        m_stage = ptr;
+        m_stage.store(ptr, std::memory_order_release);
     }
 
 private:
@@ -83,8 +83,9 @@ private:
     std::atomic<bool> m_shutdown{false};
     bool m_threadCreated{false};
 
-    // Staging buffer (set before start(), read/written by the reader thread only)
-    mercury::SourceDoubleBuffer<mercury::ImuStageData> *m_stage{nullptr};
+    // Staging buffer (set before start(), cleared on detach; atomic so the
+    // reader thread sees nullptr promptly after setStagingBuffer(nullptr)).
+    std::atomic<mercury::SourceDoubleBuffer<mercury::ImuStageData>*> m_stage{nullptr};
 
     // Per-cycle accumulator (accessed only by the reader thread)
     int m_frameCount{0};

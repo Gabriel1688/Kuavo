@@ -259,9 +259,12 @@ private:
     std::vector<bool> m_motorResponsive;
     uint64_t m_paramQueryCycle = 0;  // Round-robin counter for parameter queries
 
-    // Cross-process shared memory pointers (owned by Robot, not by Legged)
-    mercury::SharedMemoryLayout* m_shm = nullptr;
-    mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>* m_staging = nullptr;
+    // Cross-process shared memory pointers (owned by Robot, not by Legged).
+    // Atomic so the RT thread's snapshot in controllerPeriodic() sees the
+    // nullptr written by setShmPointers() without requiring pause()/resume()
+    // to act as a full memory-visibility barrier for non-atomic stores.
+    std::atomic<mercury::SharedMemoryLayout*> m_shm{nullptr};
+    std::atomic<mercury::SourceDoubleBuffer<mercury::MotorGroupStageData>*> m_staging{nullptr};
 
     // Motor safety state
     std::atomic<bool> m_motorsFaultDisabled{false};

@@ -65,6 +65,7 @@ void UdpServer::start() {
         if (rc != 0) {
             SPDLOG_ERROR("Failed to initialize thread for UdpServer[{}]", m_serverId);
         } else {
+            m_threadStarted = true;
             struct sched_param param{};
             param.sched_priority = 88;
             int ret = pthread_setschedparam(m_threadId, SCHED_FIFO, &param);
@@ -326,21 +327,22 @@ void UdpServer::run() {
 }
 
 bool UdpServer::close() {
-    if (m_isClosed) {
-        SPDLOG_INFO("server is already closed");
-        return false;
+    if (m_isClosed.exchange(true)) {
+        return false;  // already closed (or never opened)
     }
-    m_isClosed = true;
-    void *result;
-    if (pthread_join(m_threadId, &result) != 0) {
-        SPDLOG_ERROR("Failed to join thread.");
-        return false;
+    if (m_threadStarted) {
+        void *result;
+        if (pthread_join(m_threadId, &result) != 0) {
+            SPDLOG_ERROR("Failed to join UdpServer[{}] thread.", m_serverId);
+        }
+        m_threadStarted = false;
     }
-
-    const bool closeFailed = (::close(m_sockfd) == -1);
-    if (closeFailed) {
-        SPDLOG_ERROR("failed to close socket, error:{} ", strerror(errno));
-        return false;
+    if (m_sockfd >= 0) {
+        if (::close(m_sockfd) == -1) {
+            SPDLOG_ERROR("failed to close socket, error:{} ", strerror(errno));
+            return false;
+        }
+        m_sockfd = -1;
     }
     return true;
 }
