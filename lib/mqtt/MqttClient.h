@@ -36,7 +36,14 @@ public:
 	 * @param persistence The user persistence structure. If this is null,
 	 * 					then no persistence is used.
 	 */
-    MqttClient();
+    MqttClient() {
+        m_shutdown = false;
+        m_clientId = "MqttClient";
+        m_context = nullptr;
+        m_newDataOccurHandler = nullptr;
+        memset(&m_subParam, 0, sizeof(m_subParam));
+        memset(&m_pubParam, 0, sizeof(m_pubParam));
+    }
 
     /**
 	 * Virtual destructor

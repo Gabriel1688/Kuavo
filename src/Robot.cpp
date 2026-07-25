@@ -463,6 +463,9 @@ static void handle_sigterm(int) {
 }
 
 int main() {
+    // Set main thread name for debugging
+    pthread_setname_np(pthread_self(), "main");
+    
     std::signal(SIGTERM, handle_sigterm);
     setupLogger();
     //https://github.com/wpilibsuite/allwpilib/blob/7ca35e5678cf32caec6a1a866ca51d0136c4c398/wpilibcExamples/src/main/cpp/examples/HAL/c/Robot.c#L52

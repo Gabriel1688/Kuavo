@@ -49,11 +49,6 @@ static void lws_spdlog_emit(int level, const char *line) {
         spdlog::trace("[lws] {}", msg);
 }
 
-MqttClient::MqttClient() {
-    m_shutdown = false;
-    m_clientId = "MqttClient";
-}
-
 void MqttClient::loadConfig(const std::string &fileName) {
     (void) fileName;// config.yaml is loaded via Config singleton
     const auto &mqtt = Config::instance().mqtt();
@@ -83,6 +78,9 @@ void MqttClient::start() {
     if (!m_thrCreated) {
         SPDLOG_ERROR("Failed to create thread for mqtt Client.");
     } else {
+        // Set thread name for debugging
+        pthread_setname_np(m_thrId, "mqtt-client");
+        
         struct sched_param param{};
         param.sched_priority = 0;
         int ret = pthread_setschedparam(m_thrId, SCHED_OTHER, &param);

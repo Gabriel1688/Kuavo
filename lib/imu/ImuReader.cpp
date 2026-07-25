@@ -54,6 +54,9 @@ void ImuReader::start() {
     if (!m_threadCreated) {
         SPDLOG_ERROR("ImuReader: failed to create thread");
     } else {
+        // Set thread name for debugging
+        pthread_setname_np(m_threadId, "imu-reader");
+        
         struct sched_param param{};
         param.sched_priority = 80;
         int ret = pthread_setschedparam(m_threadId, SCHED_FIFO, &param);

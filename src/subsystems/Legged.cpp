@@ -43,6 +43,9 @@ Legged::Legged(int baseId,
     // Signal that the derived class is fully constructed and
     // controllerPeriodic() is safe to call from the RT thread.
     markReady();
+    
+    // Set thread name now that derived class is fully constructed
+    setThreadName();
 }
 
 void Legged::reset(const Pose2d &initialPose) {

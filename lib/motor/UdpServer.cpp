@@ -66,6 +66,12 @@ void UdpServer::start() {
             SPDLOG_ERROR("Failed to initialize thread for UdpServer[{}]", m_serverId);
         } else {
             m_threadStarted = true;
+            
+            // Set thread name for debugging
+            char thread_name[32];
+            snprintf(thread_name, sizeof(thread_name), "udp-server-%d", m_serverId);
+            pthread_setname_np(m_threadId, thread_name);
+            
             struct sched_param param{};
             param.sched_priority = 88;
             int ret = pthread_setschedparam(m_threadId, SCHED_FIFO, &param);

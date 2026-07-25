@@ -42,6 +42,13 @@ public:
      * @param outputLabels   Labels for outputs each consisting of its name and
      *                       unit.
      */
+
+    /**
+     * Returns the human-readable name of this subsystem.
+     * Used for thread naming and logging.
+     */
+    virtual std::string getName() const { return "subsystem"; }
+
     ControlledSubsystemBase() {
         m_entryThreadRunning = true;
 
@@ -65,6 +72,17 @@ public:
             } else {
                 SPDLOG_INFO("Leg thread: SCHED_FIFO priority 90");
             }
+        }
+    }
+
+    /**
+     * Sets the thread name for this subsystem's RT thread.
+     * Should be called by derived class constructors after they are fully constructed.
+     */
+    void setThreadName() {
+        if (m_entryThreadRunning) {
+            std::string name = getName();
+            pthread_setname_np(thread_id, name.c_str());
         }
     }
 
@@ -116,12 +134,15 @@ public:
         pthread_attr_destroy(&attr);
 
         if (m_entryThreadRunning.load(std::memory_order_acquire)) {
+            // Set thread name for debugging
+            setThreadName();
+
             struct sched_param param{};
             param.sched_priority = 90;
             int ret = pthread_setschedparam(thread_id, SCHED_FIFO, &param);
             if (ret != 0) {
-                SPDLOG_WARN("startThread: failed to set SCHED_FIFO/90: {}",
-                            strerror(ret));
+                SPDLOG_WARN("[{}]: startThread: failed to set SCHED_FIFO/90: {}",
+                            getName(), strerror(ret));
             }
         }
     }

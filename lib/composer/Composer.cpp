@@ -75,6 +75,9 @@ void Composer::start() {
     }
     thread_created_ = true;
 
+    // Set thread name for debugging
+    pthread_setname_np(thread_id_, "composer");
+
     // Apply SCHED_FIFO priority 85
     struct sched_param param{};
     param.sched_priority = SCHED_PRIORITY;
