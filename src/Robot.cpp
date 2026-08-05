@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace spdlog;
@@ -49,6 +50,13 @@ void Robot::robotInit() {
     int fd = shm_open(mercury::SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd < 0) {
         SPDLOG_ERROR("shm_open({}) failed: {}", mercury::SHM_NAME, strerror(errno));
+        std::exit(EXIT_FAILURE);
+    }
+    // Ensure the shared memory object is writable by any user that can attach,
+    // regardless of the process umask.
+    if (fchmod(fd, 0666) < 0) {
+        SPDLOG_ERROR("fchmod({}) failed: {}", mercury::SHM_NAME, strerror(errno));
+        close(fd);
         std::exit(EXIT_FAILURE);
     }
     if (ftruncate(fd, sizeof(mercury::SharedMemoryLayout)) < 0) {

@@ -60,6 +60,10 @@ static int g_failures   = 0;
 static SharedMemoryLayout* create_robot_shm() {
     int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     if (fd < 0) { perror("shm_open"); return nullptr; }
+    // Ensure the object is writable by any user that attaches, regardless of umask.
+    if (fchmod(fd, 0666) < 0) {
+        perror("fchmod"); close(fd); return nullptr;
+    }
     if (ftruncate(fd, sizeof(SharedMemoryLayout)) < 0) {
         perror("ftruncate"); close(fd); return nullptr;
     }
