@@ -19,6 +19,9 @@
  *
  *   # Custom IDs
  *   ./damiao_multi_simulator -ids 0x01,0x02,0x03,0x04,0x05,0x06
+ *
+ *   # Per-instance log file (required when running multiple simulators on the same host)
+ *   ./damiao_multi_simulator -ids 1,2,3 -log /var/log/kuavo/damiao-simulator-left.log
  */
 
 #include <arpa/inet.h>
@@ -38,13 +41,14 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#include <filesystem>
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/spdlog.h"
 #include <memory>
 using namespace spdlog;
 using namespace std::chrono_literals;
-void setupLogger() ;
+void setupLogger(const std::string& logFile);
 static constexpr size_t MAX_MOTORS = 12;
 static constexpr size_t CAN_FRAME_SIZE = 13;
 
@@ -735,11 +739,13 @@ static void printUsage(const char* prog) {
               << " [-local port]"
               << " [-remote port]"
               << " [-ids id1,id2,...,id6]"
+              << " [-log log_file]"
               << "\n\nExamples:\n"
               << "  " << prog << " -ids 1\n"
               << "  " << prog << " -ids 1,2,3,4,5,6\n"
               << "  " << prog << " -ids 0x01,0x02,0x03 -mode imu\n"
               << "  " << prog << " -ids 1,2,3 -local 8886 -remote 8887\n"
+              << "  " << prog << " -ids 1,2,3 -local 8886 -remote 8887 -log /var/log/kuavo/left.log\n"
               << std::endl;
 }
 
@@ -751,22 +757,37 @@ int main(int argc, char* argv[]) {
     int localPort        = 8886;   // [1]
     int remotePort       = 8887;   // [1]
     std::string idString = "1";    // Default: single motor with ID 1
-    setupLogger();
+    std::string logFile  = "../logs/damiao_simulator.log"; // Default log path
+
+    // First pass: look for -log (and -h/--help) before configuring the logger
+    // so that all subsequent messages are written to the requested file.
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-log") == 0 && i + 1 < argc) {
+            logFile = argv[++i];
+        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printUsage(argv[0]);
+            return 0;
+        }
+    }
+    setupLogger(logFile);
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-local") == 0 && i + 1 < argc) {
             localPort = atoi(argv[++i]);
             if (localPort <= 0 || localPort > 65535) {
-                SPDLOG_ERROR("invalid local port {}",localPort);
+                SPDLOG_ERROR("invalid local port {}", localPort);
                 return 1;
             }
         } else if (strcmp(argv[i], "-remote") == 0 && i + 1 < argc) {
             remotePort = atoi(argv[++i]);
             if (remotePort <= 0 || remotePort > 65535) {
-                SPDLOG_ERROR("invalid remote port {}",remotePort);
+                SPDLOG_ERROR("invalid remote port {}", remotePort);
                 return 1;
             }
         } else if (strcmp(argv[i], "-ids") == 0 && i + 1 < argc) {
             idString = argv[++i];
+        } else if (strcmp(argv[i], "-log") == 0 && i + 1 < argc) {
+            i++;  // already handled in the first pass
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -785,7 +806,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (motorIds.size() > MAX_MOTORS) {
-        SPDLOG_ERROR("max {}  motors supported",MAX_MOTORS);
+        SPDLOG_ERROR("max {}  motors supported", MAX_MOTORS);
         return 1;
     }
 
@@ -797,10 +818,23 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-void setupLogger() {
+void setupLogger(const std::string& logFile) {
     std::string pattern = "[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] [%s:%#] %v";
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("../logs/damiao_simulator.log", 100 * 1024, 3);
+
+    // Ensure the log file's parent directory exists so multiple instances can
+    // each be pointed at their own distinct log file.
+    std::filesystem::path logPath(logFile);
+    if (logPath.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(logPath.parent_path(), ec);
+        if (ec) {
+            std::cerr << "Warning: could not create log directory "
+                      << logPath.parent_path() << ": " << ec.message() << std::endl;
+        }
+    }
+
+    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logFile, 100 * 1024, 3);
     auto logger = std::make_shared<spdlog::logger>("multi_sink", spdlog::sinks_init_list{console_sink, file_sink});
     console_sink->set_level(spdlog::level::debug);
     file_sink->set_level(spdlog::level::debug);
