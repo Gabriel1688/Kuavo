@@ -15,7 +15,6 @@
 //TODO:: refactor the base class of subsystem.
 
 static constexpr uint64_t COMMAND_STALE_THRESHOLD_NS = mercury::HEARTBEAT_STALE_NS;
-static constexpr uint64_t HEARTBEAT_TIMEOUT_NS = mercury::HEARTBEAT_STALE_NS;
 
 Legged::Legged(int baseId,
                mercury::SharedMemoryLayout* shm,
@@ -80,21 +79,10 @@ void Legged::controllerPeriodic() {
         return;
     }
 
-    auto lifecycle = static_cast<mercury::ShmLifecycle>(
-        shm->lifecycle_state.load(std::memory_order_acquire));
-    if (lifecycle != mercury::ShmLifecycle::RUNNING) {
-        SPDLOG_TRACE("[{}] controllerPeriodic: SHM lifecycle not RUNNING, skipping.", getName());
-        disableAllMotorsOnce(SHM_LIFECYCLE_NOT_RUNNING);
-        return;
-    }
-
-    uint64_t heartbeat = shm->controller_heartbeat_ns.load(std::memory_order_acquire);
-    uint64_t hb_age_ns = (heartbeat != 0 && heartbeat <= now_ns)
-                        ? (now_ns - heartbeat) : 0;
-    if (heartbeat == 0 || hb_age_ns > HEARTBEAT_TIMEOUT_NS) {
-        SPDLOG_WARN("[{}] controllerPeriodic: producer heartbeat stale ({}ms), disabling motors.",
-                    getName(), hb_age_ns / 1'000'000ULL);
-        disableAllMotorsOnce(HEARTBEAT_STALE);
+    // Controller-initiated emergency stop
+    if (shm->controller_emergency_stop.load(std::memory_order_acquire)) {
+        SPDLOG_TRACE("[{}] controllerPeriodic: controller_emergency_stop active, disabling motors.", getName());
+        disableAllMotorsOnce(CONTROLLER_EMERGENCY_STOP);
         return;
     }
 
@@ -382,10 +370,8 @@ static const char* disableReasonString(int reason) {
             return "invalid SHM magic";
         case Legged::SHM_VERSION_MISMATCH:
             return "SHM version mismatch";
-        case Legged::SHM_LIFECYCLE_NOT_RUNNING:
-            return "SHM lifecycle not RUNNING";
-        case Legged::HEARTBEAT_STALE:
-            return "producer heartbeat stale";
+        case Legged::CONTROLLER_EMERGENCY_STOP:
+            return "controller emergency stop";
         case Legged::EMERGENCY_STOP_ACTIVE:
             return "emergency_stop active";
         case Legged::CMD_WRITE_IDX_INVALID:

@@ -113,49 +113,63 @@ This is the fastest way to start the controller for development and testing.
 
 ## 2. Robot–Controller Connection
 
-The Robot does not create the shared memory segment. It waits for the controller service to publish it and then attaches as a consumer.
+The Robot creates and owns the shared memory segment.  The controller waits for the Robot to publish it and then attaches as a consumer.
 
 ### 2.1 Shared memory segment
 
-The controller creates a POSIX shared memory object named:
+The **Kuavo Robot** creates a POSIX shared memory object named:
 
 ```
 /dev/shm/mercury_robot_ipc
 ```
 
-It publishes:
-- `magic` = `0x4D455243` ("MERC")
-- `version` = `3`
-- `lifecycle_state` = `RUNNING`
-- `controller_heartbeat_ns` updated every control cycle
+It initializes:
+- `version` = `5`
+- `num_joints`, `control_freq_hz`, `robot_id`, `motor_can_ids`
+- `lifecycle_state` = `RUNNING` (release)
+- `magic` = `0x4D455243` ("MERC") (release, written last as the readiness sentinel)
 
-### 2.2 Robot startup attach
+The controller opens the existing segment with `shm_open(O_RDWR)` (no `O_CREAT`), validates `fstat` size, `magic`, `version`, and `lifecycle_state == RUNNING` before proceeding.
 
-In `Robot::robotInit()` the Robot calls `tryAttachSharedMemory()` in a loop:
+### 2.2 Kuavo Robot systemd unit
 
-- Polls every `100 ms`
-- Times out after `30 s`
-- Exits if no valid SHM appears within the timeout
+The Robot's systemd service should include SHM cleanup directives to handle stale segments from a previous crash:
 
-This means the Robot tolerates the controller service taking up to 30 seconds to become ready. Once attached, `Robot::attachSharedMemory()` starts the IMU, Composer, Logger, and leg threads.
+```ini
+ExecStartPre=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
+ExecStopPost=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
+Restart=on-failure
+```
 
-### 2.3 Runtime validation and reconnection
+### 2.3 Robot startup
 
-`Robot::robotPeriodic()` validates the SHM every cycle:
-- `magic` matches `SHM_MAGIC`
-- `version` matches `SHM_VERSION`
-- `lifecycle_state` is `RUNNING`
-- `controller_heartbeat_ns` is fresh (stale threshold: `100 ms`)
+In `Robot::robotInit()` the Robot creates and initializes the SHM segment directly:
 
-If any check fails, `Robot::detachSharedMemory()`:
-- Disables both legs
-- Pauses and clears leg SHM pointers
-- Stops IMU, Composer, Logger
-- Unmaps the SHM
+- Calls `shm_open(O_CREAT | O_RDWR)` + `ftruncate(sizeof(SharedMemoryLayout))`
+- Initializes all fields (version, joints, frequencies, zeroed buffers)
+- Writes `lifecycle_state = RUNNING` and `magic = SHM_MAGIC` as final release-ordered stores
+- Exits on `shm_open`/`ftruncate`/`mmap` failure
+- Then calls `attachSharedMemory()` to start IMU, Composer, Logger, and leg threads
 
-Then `robotPeriodic()` retries `shm_open` every `10 cycles` (`100 ms`) until the controller service is back.
+### 2.4 Controller startup
 
-### 2.4 Manual leg re-enable
+The mercury controller attaches as a consumer:
+
+- Polls `shm_open(O_RDWR)` every 100ms until the Robot's SHM segment appears
+- Validates `fstat` size >= `sizeof(SharedMemoryLayout)`
+- Validates `magic`, `version`, `lifecycle_state == RUNNING`
+- If any check fails, re-enters the retry loop
+
+### 2.5 Runtime validation
+
+**Robot (`robotPeriodic()`):**
+- Checks command-timestamp staleness: reads `cmd_buffers[cmd_write_idx].timestamp_ns`, skips if zero (controller never connected), sets `emergency_stop` if age > 100ms
+- Propagates `controller_emergency_stop` to `emergency_stop`
+
+**Controller (main loop):**
+- Checks `compose_timestamp_ns` staleness: if age > 100ms, detaches (`munmap`) and re-enters the `shm_open` retry loop
+
+### 2.6 Manual leg re-enable
 
 After reattachment, the legs stay disabled. The operator must explicitly enable them:
 - Button press mapped to `MSG_ENABLE_SUBSYSTEM` for left/right leg
@@ -163,13 +177,15 @@ After reattachment, the legs stay disabled. The operator must explicitly enable 
 
 The Robot only resumes motor control after this explicit operator action.
 
-### 2.5 Failure scenarios
+### 2.7 Failure scenarios
 
-| Event | Controller behavior | Robot behavior |
+| Event | Robot behavior | Controller behavior |
 |---|---|---|
-| Graceful shutdown (SIGTERM) | Sets `SHUTTING_DOWN` -> `emergency_stop=true` -> `TERMINATED`, then unlinks SHM | Detects lifecycle change, detaches, retries `shm_open` |
-| Crash (`kill -9`) | Heartbeat stops | Detects stale heartbeat (>100 ms), detaches, disables motors, retries `shm_open` |
-| Controller restart | Recreates SHM | Reattaches after up to 100 ms retry; legs stay disabled until operator enables |
+| Robot graceful shutdown | Sets `lifecycle_state = SHUTTING_DOWN` then `TERMINATED`, calls `shm_unlink` | Detects stale compose data or invalid lifecycle, detaches, retries `shm_open` |
+| Robot crash (`kill -9`) | SHM remains until `ExecStopPost` cleans it up; next Robot start creates fresh | Controller detects stale compose data, detaches, retries |
+| Controller graceful shutdown (SIGTERM) | Detects stale `cmd.timestamp_ns` (>100ms), sets `emergency_stop`, disables motors | `munmap` only (no `shm_unlink`) |
+| Controller crash (`kill -9`) | Same as graceful: stale command timestamp triggers motor disable within 100ms | Nothing — heartbeat was the old mechanism |
+| Controller restart | Legs stay disabled until operator re-enables | Re-attaches to existing Robot SHM after up to 100ms retry |
 
 ## 3. Real-time Thread Scheduling
 
@@ -497,3 +513,184 @@ sudo systemctl restart mosquitto
 sudo ufw allow 1883/tcp
 sudo ufw allow 9001/tcp
 ```
+
+## 7. Mercury WBLC Service (IJRR_WBLC Integration)
+
+The Mercury WBLC (Whole-Body Controller) from IJRR_WBLC provides advanced whole-body control algorithms integrated with Kuavo via shared memory. This service runs Mercury's WBC controller and communicates with Kuavo through the `/dev/shm/mercury_robot_ipc` shared memory segment.
+
+### 7.1 Build the Mercury WBLC service
+
+```bash
+# Navigate to the IJRR_WBLC project
+cd /home/gabriel_wang/work/IJRR_WBLC
+
+# Configure and build the project
+mkdir -p cmake-build-debug
+cd cmake-build-debug
+cmake .. -DCMAKE_BUILD_TYPE=Debug
+cmake --build . --target mercury_service
+```
+
+The mercury_service executable will be created at:
+```
+/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/mercury_service
+```
+
+### 7.2 Install the service (system-wide)
+
+```bash
+# Copy the service file
+sudo cp /home/gabriel_wang/work/IJRR_WBLC/mercury-service.service /etc/systemd/system/
+
+# Reload systemd and enable the service
+sudo systemctl daemon-reload
+sudo systemctl enable mercury-service
+sudo systemctl start mercury-service
+```
+
+### 7.3 User service (no sudo)
+
+If you do not have passwordless sudo, you can run the Mercury WBLC service under your user session:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp /home/gabriel_wang/work/IJRR_WBLC/mercury-service.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable mercury-service
+systemctl --user start mercury-service
+```
+
+You must update the `ExecStart` and `WorkingDirectory` paths inside the user unit file, e.g.:
+
+```ini
+WorkingDirectory=/home/gabriel_wang/work/IJRR_WBLC
+ExecStart=/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/mercury_service
+```
+
+### 7.4 Service configuration
+
+The Mercury WBLC service uses the following configuration:
+
+| Parameter | Value | Description |
+|---|---|---|
+| **Control Frequency** | 400 Hz | Matches Kuavo's Composer thread frequency |
+| **Joint Mapping** | 6→12 | Mercury's 6 joints mapped to Kuavo's 12 motor slots via double-cell duplication |
+| **Shared Memory** | `/dev/shm/mercury_robot_ipc` | Attaches to Kuavo's existing shared memory |
+| **MIT Gains** | kp=50.0, kd=5.0 | Default MIT mode gains for Phase 1 |
+
+### 7.5 Integration details
+
+**Shared Memory Architecture:**
+- Mercury WBLC acts as SHM owner/producer or attaches to existing Kuavo SHM
+- Uses double-buffered command and sensor data structures
+- Implements 6→12 joint expansion via double-cell command mapping
+- Implements 12→6 joint reduction for sensor data conversion
+
+**Joint Mapping Strategy:**
+- Left leg: Mercury[0-2] → Kuavo[0-5] (2 motors per joint)
+- Right leg: Mercury[3-5] → Kuavo[6-11] (2 motors per joint)
+- Each Mercury joint command written to 2 consecutive Kuavo motor slots
+
+**Timing:**
+- Mercury's servo_rate adapted from 1500Hz to 400Hz to match Kuavo
+- Control loop maintains precise 400Hz timing using monotonic clock
+
+### 7.6 Manage the service
+
+```bash
+# Check status
+sudo systemctl status mercury-service
+# journal logs
+sudo journalctl -u mercury-service -f
+
+# Stop / restart
+sudo systemctl stop mercury-service
+sudo systemctl restart mercury-service
+```
+
+For the user service, drop `sudo` and add `--user`:
+
+```bash
+systemctl --user status mercury-service
+systemctl --user restart mercury-service
+```
+
+### 7.7 Debug build quick install
+
+To run the Mercury WBLC service directly from the CMake build directory without installing system-wide:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/mercury-service.service << 'EOF'
+[Unit]
+Description=Mercury Whole-Body Controller Service with Kuavo Shared Memory Integration
+After=network.target
+
+[Service]
+Type=simple
+User=gabriel_wang
+WorkingDirectory=/home/gabriel_wang/work/IJRR_WBLC
+ExecStart=/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/mercury_service
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mercury-service
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Environment
+LD_LIBRARY_PATH=/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/DynaController/Mercury_Controller:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/Filter:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/RobotSystems/Mercury:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/WBC/WBLC:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/Planner/PIPM_FootPlacementPlanner:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/ExternalSource/rbdl:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/ExternalSource/urdf:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/ExternalSource/Optimizer/Goldfarb:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/Utils:/home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/ExternalSource/ParamHandler
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable mercury-service
+systemctl --user start mercury-service
+```
+
+### 7.8 Manual testing
+
+For quick testing without systemd, run the service directly:
+
+```bash
+cd /home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug
+./mercury_service
+
+# Or with timeout for testing
+timeout 30 ./mercury_service
+```
+
+### 7.9 Troubleshooting
+
+**Shared memory permission denied:**
+```bash
+# Check if shared memory exists
+ls -l /dev/shm/mercury_robot_ipc
+
+# If owned by root and inaccessible, the service will attach to existing SHM
+# or create new SHM as the current user
+```
+
+**Service fails to start:**
+```bash
+# Check detailed logs
+sudo journalctl -u mercury-service -n 50
+
+# Verify library dependencies
+ldd /home/gabriel_wang/work/IJRR_WBLC/cmake-build-debug/mercury_service
+```
+
+**Timing issues:**
+- Ensure Mercury's servo_rate is set to 1.0/400.0 in `RobotSystems/Mercury/Mercury_Definition.h`
+- Verify system has sufficient CPU for 400Hz control loop
+- Check for other processes consuming CPU resources
+
+**Integration with Kuavo:**
+- Mercury WBLC will attach to existing Kuavo SHM if available
+- If Kuavo SHM doesn't exist, Mercury WBLC will create it
+- Both systems must use compatible SHM version (currently version 4)

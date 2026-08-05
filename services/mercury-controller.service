@@ -1,5 +1,5 @@
 [Unit]
-Description=Mercury controller SHM producer
+Description=Mercury controller SHM consumer
 Documentation=https://github.com/cognition-x/Kuavo/blob/main/services/mercury-controller
 After=network.target
 
@@ -13,13 +13,11 @@ Environment="MERCURY_CONTROLLER_FREQ=200"
 Environment="MERCURY_CONTROLLER_DUR=0"
 Environment="MERCURY_CONTROLLER_JOINTS=12"
 ExecStart=/usr/local/bin/mercury-controller
-ExecStartPre=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
-ExecStopPost=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
 Restart=on-failure
 RestartSec=2
 
-# Ensure the service owns /dev/shm/mercury_robot_ipc while running.
-# The controller itself creates and unlinks the POSIX shared memory segment.
+# The controller is a consumer — it attaches to the Robot-owned SHM segment.
+# SHM creation, sizing, and cleanup are handled by the Kuavo Robot service.
 StandardOutput=journal
 StandardError=journal
 

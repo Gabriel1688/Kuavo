@@ -79,7 +79,6 @@ private:
     Imu imu_subsystem;
 
     // SHM lifecycle helpers
-    mercury::SharedMemoryLayout* tryAttachSharedMemory();
     void detachSharedMemory();
     void attachSharedMemory();
 

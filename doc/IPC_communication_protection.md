@@ -3,7 +3,7 @@
 
 ## Problem
 
-The `Legged::controllerPeriodic()` crashes at `std::atomic<uint32_t>::load()` (line 59) because `ControlledSubsystemBase` spawns a dedicated pthread per subsystem instance [1] **immediately in the constructor**, before the producer process (Mercury Controller) has created or initialized the POSIX shared memory region. This process is the **consumer only** — it does not own the shared memory lifecycle.
+The `Legged::controllerPeriodic()` crashes at `std::atomic<uint32_t>::load()` (line 59) because `ControlledSubsystemBase` spawns a dedicated pthread per subsystem instance [1] **immediately in the constructor**, before the owner process (Kuavo Robot) has finished creating and initializing the POSIX shared memory region. The Mercury Controller is the **consumer** — it attaches to the Robot's shared memory but does not own or create it.
 
 The constructor call chain shows the race clearly:
 
@@ -16,7 +16,7 @@ Robot::Robot() [Robot.h:64]
           → atomic<uint32_t>::load() → SEGV
 ```
 
-The thread starts running `controllerPeriodic()` before the `Robot` constructor even finishes [1]. At this point, the shared memory pointer may reference a region that the producer has not yet created via `shm_open()` + `ftruncate()`.
+The thread starts running `controllerPeriodic()` before the `Robot` constructor even finishes [1]. At this point, the shared memory region may not yet be fully initialized via `shm_open()` + `ftruncate()`.
 
 ---
 
@@ -27,9 +27,9 @@ Each layer addresses a different failure mode. All layers are needed because no 
 ```
 Layer 1: Deferred Thread Start        → Prevents startup crash
 Layer 2: Shared Memory Validation     → Prevents reading uninitialized SHM
-Layer 3: Producer Lifecycle State      → Handles graceful producer shutdown
-Layer 4: Heartbeat Watchdog           → Detects producer crash
-Layer 5: Safe Reconnection Loop       → Recovers from producer restart
+Layer 3: Owner Lifecycle State         → Handles graceful owner (Robot) shutdown
+Layer 4: Command Staleness Watchdog   → Detects controller disconnect
+Layer 5: Safe Reconnection Loop       → Recovers from controller reconnection
 ```
 
 ---
@@ -108,35 +108,37 @@ void Robot::robotInit() {
 }
 ```
 
-This directly addresses the race where Thread T4 reads shared memory before the producer initializes it. The `ControlledSubsystemBase` still spawns a dedicated pthread per subsystem instance [1], but the thread waits for an explicit signal before accessing any shared state.
+This directly addresses the race where Thread T4 reads shared memory before the Robot initializes it. The `ControlledSubsystemBase` still spawns a dedicated pthread per subsystem instance [1], but the thread waits for an explicit signal before accessing any shared state.
 
 ---
 
 ## Layer 2: Shared Memory Validation (Guards Every Read)
 
-Even after `start()` is called, the shared memory could become invalid during operation (producer unmaps it, OS reclaims pages). Every access to shared memory in `controllerPeriodic()` must be guarded by a validity check.
+Even after `start()` is called, the shared memory could become invalid during operation (owner unmaps it, OS reclaims pages). Every access to shared memory in `controllerPeriodic()` must be guarded by a validity check.
 
 The magic number pattern is used because the binary `RobotStatusWire` packet already uses magic number 0x4B564155 for validation [1] — the same pattern applies to shared memory.
 
 ```cpp
 // mercury_shm.h — shared memory layout with magic validation
 
-static constexpr uint32_t SHM_MAGIC = 0x4D455243;  // "MERC"
+static constexpr uint32_t SHM_MAGIC   = 0x4D455243;  // "MERC"
+static constexpr uint32_t SHM_VERSION = 5;
 
 struct SharedMemoryLayout {
     std::atomic<uint32_t> magic;         // Must equal SHM_MAGIC
-    std::atomic<uint32_t> version;       // Protocol version
+    std::atomic<uint32_t> version;       // Must equal SHM_VERSION (5)
     uint32_t num_joints;
     uint32_t control_freq_hz;
 
     // Lifecycle state (Layer 3)
     std::atomic<uint32_t> lifecycle_state;
 
-    // Heartbeat (Layer 4)
-    std::atomic<uint64_t> producer_heartbeat_ns;
+    // Emergency stop flags
+    std::atomic<bool> emergency_stop;             // Set by Robot when controller is stale
+    std::atomic<bool> controller_emergency_stop;  // Set by Controller to signal e-stop to Robot
 
     // Command double buffer
-    MercuryCommand cmd_buffers[2];
+    MercuryCommand cmd_buffers[2];       // Each contains a timestamp_ns field
     std::atomic<uint32_t> cmd_write_idx;
     // ... rest of layout
 };
@@ -153,7 +155,7 @@ void Legged::controllerPeriodic() {
 
     uint32_t magic = m_shm->magic.load(std::memory_order_acquire);
     if (magic != SHM_MAGIC) {
-        // SHM exists but producer has not initialized it yet,
+        // SHM exists but owner has not initialized it yet,
         // or the memory has been corrupted/reclaimed
         return;
     }
@@ -171,26 +173,33 @@ This check runs every cycle (every 5 ms at the 200 Hz inner loop rate [2]). The 
 
 ---
 
-## Layer 3: Producer Lifecycle State (Graceful Shutdown)
+## Layer 3: Owner Lifecycle State (Graceful Shutdown)
 
-When the producer (Mercury Controller) shuts down gracefully, it should notify the consumer before closing the shared memory. A `lifecycle_state` atomic variable inside the shared memory allows this coordination.
+When the owner (Robot) shuts down gracefully, it should notify consumers before closing the shared memory. A `lifecycle_state` atomic variable inside the shared memory allows this coordination.
 
 ```cpp
 // mercury_shm.h — lifecycle states
 
 enum class ShmLifecycle : uint32_t {
-    UNINITIALIZED = 0,     // Producer has not started
-    INITIALIZING  = 1,     // Producer is setting up fields
-    RUNNING       = 2,     // Normal operation — safe to read
-    SHUTTING_DOWN = 3,     // Producer is about to exit
-    TERMINATED    = 4,     // Producer has exited
+    UNINITIALIZED = 0,     // Owner has not started
+    INITIALIZING  = 1,     // Owner is setting up fields
+    RUNNING       = 2,     // Normal operation — safe to read/write
+    SHUTTING_DOWN = 3,     // Owner is about to exit
+    TERMINATED    = 4,     // Owner has exited
 };
 ```
 
-**Producer side** (Mercury Controller — the other process):
+**Owner side** (Robot — the SHM owner):
 
 ```cpp
-// Producer startup
+// Owner startup — Robot creates and initializes SHM
+int fd = shm_open("/mercury_robot_ipc", O_CREAT | O_RDWR, 0666);
+ftruncate(fd, sizeof(SharedMemoryLayout));
+void* ptr = mmap(nullptr, sizeof(SharedMemoryLayout),
+                 PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+close(fd);
+auto* shm = static_cast<SharedMemoryLayout*>(ptr);
+
 shm->lifecycle_state.store(
     static_cast<uint32_t>(ShmLifecycle::INITIALIZING),
     std::memory_order_release);
@@ -202,7 +211,7 @@ shm->lifecycle_state.store(
     static_cast<uint32_t>(ShmLifecycle::RUNNING),
     std::memory_order_release);
 
-// Producer shutdown (graceful)
+// Owner shutdown (graceful) — Robot tears down SHM
 shm->lifecycle_state.store(
     static_cast<uint32_t>(ShmLifecycle::SHUTTING_DOWN),
     std::memory_order_release);
@@ -210,9 +219,36 @@ shm->lifecycle_state.store(
 shm->lifecycle_state.store(
     static_cast<uint32_t>(ShmLifecycle::TERMINATED),
     std::memory_order_release);
+munmap(shm, sizeof(SharedMemoryLayout));
+shm_unlink("/mercury_robot_ipc");  // Robot calls shm_unlink on shutdown
 ```
 
-**Consumer side** (Kuavo — `controllerPeriodic()`):
+**Consumer side** (Mercury Controller — attaches to Robot's SHM):
+
+```cpp
+// Controller attaches — no O_CREAT, controller never creates SHM
+int fd = shm_open("/mercury_robot_ipc", O_RDWR, 0666);
+if (fd < 0) {
+    // Robot has not created SHM yet — retry later
+    return;
+}
+// ... fstat + mmap as in Layer 5 ...
+
+// Controller checks lifecycle in its loop
+auto state = static_cast<ShmLifecycle>(
+    shm->lifecycle_state.load(std::memory_order_acquire));
+
+if (state != ShmLifecycle::RUNNING) {
+    if (state == ShmLifecycle::SHUTTING_DOWN ||
+        state == ShmLifecycle::TERMINATED) {
+        // Owner (Robot) is shutting down — stop sending commands
+        spdlog::warn("Robot shutting down — controller detaching");
+    }
+    return;  // Do not write command buffer
+}
+```
+
+**Robot side** — reads lifecycle and reacts to controller disconnect:
 
 ```cpp
 void Legged::controllerPeriodic() {
@@ -230,10 +266,10 @@ void Legged::controllerPeriodic() {
     if (state != ShmLifecycle::RUNNING) {
         if (state == ShmLifecycle::SHUTTING_DOWN ||
             state == ShmLifecycle::TERMINATED) {
-            // Producer is shutting down — disable motors safely
+            // Owner is shutting down — disable motors safely
             // Motor disable requires 0xFD command [1]
             disableAllMotors();
-            spdlog::warn("Producer shutting down — motors disabled");
+            spdlog::warn("Owner shutting down — motors disabled");
         }
         return;  // Do not read command buffer
     }
@@ -250,29 +286,33 @@ Motor disable uses the 0xFD command — the same command used by the existing mo
 
 ---
 
-## Layer 4: Heartbeat Watchdog (Detects Producer Crash)
+## Layer 4: Command Staleness Watchdog (Detects Controller Disconnect)
 
-Layer 3 handles graceful shutdown but not crashes. If the producer process is killed by SIGKILL or segfaults, the `lifecycle_state` field will remain at `RUNNING` forever. A heartbeat timestamp detects this case.
+Layer 3 handles graceful shutdown but not crashes. If the controller process (Mercury Controller) is killed by SIGKILL or segfaults, the `lifecycle_state` field will remain at `RUNNING` forever. The Robot detects a dead controller by checking the staleness of the most recent command timestamp in the shared memory.
 
-The motor responsiveness timeout is 500 ms [2] — the heartbeat timeout should be tighter to detect producer death before the motor timeout fires.
+The motor responsiveness timeout is 500 ms [2] — the staleness timeout should be tighter to detect controller death before the motor timeout fires.
 
 ```cpp
-// mercury_shm.h — heartbeat field (already in SharedMemoryLayout above)
-// std::atomic<uint64_t> producer_heartbeat_ns;
+// mercury_shm.h — command buffer includes timestamp
+// Each MercuryCommand contains a timestamp_ns field written by the controller.
+// The controller_emergency_stop field allows the controller to signal e-stop.
+// std::atomic<bool> controller_emergency_stop;  // (already in SharedMemoryLayout above)
 ```
 
-**Producer side** — updates heartbeat every cycle:
+**Controller side** — updates command timestamp every cycle:
 
 ```cpp
-// In the producer's control loop (e.g., every 5 ms):
-shm->producer_heartbeat_ns.store(
-    get_monotonic_ns(), std::memory_order_release);
+// In the controller's control loop (e.g., every 5 ms):
+auto& buf = shm->cmd_buffers[next_write_idx];
+buf.timestamp_ns = get_monotonic_ns();
+// ... fill command fields ...
+shm->cmd_write_idx.store(next_write_idx, std::memory_order_release);
 ```
 
-**Consumer side** — checks heartbeat staleness:
+**Robot side** — checks command timestamp staleness:
 
 ```cpp
-static constexpr uint64_t HEARTBEAT_TIMEOUT_NS = 200'000'000;  // 200 ms
+static constexpr uint64_t CMD_STALENESS_TIMEOUT_NS = 100'000'000;  // 100 ms
 // Tighter than the 500 ms motor responsiveness timeout [2]
 
 void Legged::controllerPeriodic() {
@@ -289,43 +329,51 @@ void Legged::controllerPeriodic() {
         return;
     }
 
-    // Layer 4: Heartbeat
-    uint64_t last_heartbeat =
-        m_shm->producer_heartbeat_ns.load(std::memory_order_acquire);
+    // Layer 4a: Controller emergency stop
+    if (m_shm->controller_emergency_stop.load(std::memory_order_acquire)) {
+        spdlog::error("Controller signalled emergency stop — disabling motors");
+        disableAllMotors();
+        m_controllerAlive = false;
+        return;
+    }
+
+    // Layer 4b: Command timestamp staleness
+    uint32_t rb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+    uint64_t cmd_timestamp = m_shm->cmd_buffers[rb].timestamp_ns;
     uint64_t now = get_monotonic_ns();
 
-    if (last_heartbeat == 0) {
-        // Producer has never written a heartbeat
+    if (cmd_timestamp == 0) {
+        // Controller has never written a command — skip
         return;
     }
 
-    if ((now - last_heartbeat) > HEARTBEAT_TIMEOUT_NS) {
-        // Producer has not updated heartbeat for > 200 ms
+    if ((now - cmd_timestamp) > CMD_STALENESS_TIMEOUT_NS) {
+        // Controller has not updated commands for > 100 ms
         // Motor responsiveness timeout is 500 ms [2] — we detect first
-        spdlog::error("Producer heartbeat stale ({} ms) — disabling motors",
-                      (now - last_heartbeat) / 1'000'000);
+        spdlog::error("Controller commands stale ({} ms) — setting emergency stop",
+                      (now - cmd_timestamp) / 1'000'000);
+        m_shm->emergency_stop.store(true, std::memory_order_release);
         disableAllMotors();
-        m_producerAlive = false;
+        m_controllerAlive = false;
         return;
     }
 
-    m_producerAlive = true;
+    m_controllerAlive = true;
 
     // Safe to read commands
-    uint32_t rb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
     MercuryCommand cmd;
     std::memcpy(&cmd, &m_shm->cmd_buffers[rb], sizeof(MercuryCommand));
     // ... dispatch
 }
 ```
 
-The 200 ms timeout is chosen to be tighter than the 500 ms motor responsiveness timeout [2], ensuring the consumer detects a dead producer before the motors are individually flagged as unresponsive.
+The 100 ms timeout is chosen to be tighter than the 500 ms motor responsiveness timeout [2], ensuring the Robot detects a dead controller before the motors are individually flagged as unresponsive.
 
 ---
 
-## Layer 5: Safe Reconnection Loop (Producer Restart Recovery)
+## Layer 5: Safe Reconnection Loop (Controller Reconnection Recovery)
 
-After the producer crashes and restarts, it creates a **new** shared memory region. The consumer must detect this, detach from the stale region, and reattach to the new one. This runs in `robotPeriodic()` (the 20 ms / 50 Hz main loop [1]), not in `controllerPeriodic()`.
+After the controller disconnects and reconnects, it attaches to the Robot's **existing** shared memory region. The Robot owns the SHM for its entire lifetime — the controller is always a consumer. The reconnection check runs in `robotPeriodic()` (the 20 ms / 50 Hz main loop [1]), not in `controllerPeriodic()`.
 
 ```cpp
 // Robot.cpp — reconnection logic in robotPeriodic()
@@ -334,40 +382,49 @@ void Robot::robotPeriodic() {
     // ... button events via m_loop.poll() [1]
     // ... mode management [1]
 
-    // Layer 5: SHM reconnection check (runs at 50 Hz)
-    if (!m_leftLeg.isProducerAlive()) {
-        spdlog::warn("Producer lost — attempting reconnection...");
+    // Layer 5: Controller reconnection check (runs at 50 Hz)
+    if (!m_leftLeg.isControllerAlive()) {
+        spdlog::warn("Controller lost — waiting for reconnection...");
 
         // Stop the subsystem thread safely
         m_leftLeg.stop();
 
-        // Detach from stale shared memory
+        // Clear the emergency_stop flag so the controller can reconnect
         if (m_shm) {
-            munmap(m_shm, sizeof(SharedMemoryLayout));
-            m_shm = nullptr;
+            m_shm->emergency_stop.store(false, std::memory_order_release);
+            m_shm->controller_emergency_stop.store(false, std::memory_order_release);
         }
 
-        // Attempt to reattach
-        m_shm = tryAttachSharedMemory();
-
+        // Check if controller has started writing fresh commands
         if (m_shm && m_shm->magic.load(std::memory_order_acquire) == SHM_MAGIC) {
             auto state = static_cast<ShmLifecycle>(
                 m_shm->lifecycle_state.load(std::memory_order_acquire));
 
             if (state == ShmLifecycle::RUNNING) {
-                // Producer is back and initialized
-                m_leftLeg.setSharedMemory(m_shm);
-                m_leftLeg.start();
-                spdlog::info("Reconnected to producer — subsystem restarted");
+                uint32_t rb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+                uint64_t cmd_ts = m_shm->cmd_buffers[rb].timestamp_ns;
+                uint64_t now = get_monotonic_ns();
+
+                if (cmd_ts != 0 && (now - cmd_ts) < CMD_STALENESS_TIMEOUT_NS) {
+                    // Controller is back and writing fresh commands
+                    m_leftLeg.setSharedMemory(m_shm);
+                    m_leftLeg.start();
+                    spdlog::info("Controller reconnected — subsystem restarted");
+                }
             }
         }
     }
 }
+```
 
-SharedMemoryLayout* Robot::tryAttachSharedMemory() {
+**Controller side** — attaches to Robot's SHM (consumer, no `O_CREAT`):
+
+```cpp
+SharedMemoryLayout* Controller::tryAttachSharedMemory() {
+    // Controller opens existing SHM — no O_CREAT, never creates
     int fd = shm_open("/mercury_robot_ipc", O_RDWR, 0666);
     if (fd < 0) {
-        return nullptr;  // Producer has not created SHM yet
+        return nullptr;  // Robot has not created SHM yet
     }
 
     // Check the file size before mapping
@@ -387,15 +444,17 @@ SharedMemoryLayout* Robot::tryAttachSharedMemory() {
 
     return static_cast<SharedMemoryLayout*>(ptr);
 }
+
+// Controller NEVER calls shm_unlink — only the Robot does on shutdown.
 ```
 
-The `fstat()` check before `mmap()` is critical — it prevents the exact crash you experienced. If the producer has called `shm_open()` but not yet `ftruncate()`, the file size is 0. Mapping it and accessing any offset beyond byte 0 triggers SIGSEGV because there is no backing page. The `fstat()` check catches this case before `mmap()`.
+The `fstat()` check before `mmap()` is critical — it prevents the exact crash you experienced. If the Robot has called `shm_open()` but not yet `ftruncate()`, the file size is 0. Mapping it and accessing any offset beyond byte 0 triggers SIGSEGV because there is no backing page. The `fstat()` check catches this case before `mmap()`.
 
 ---
 
 ## Motor Disable Helper
 
-All layers call `disableAllMotors()` when the producer becomes unavailable. This sends the 0xFD disable command to all motors, using the same motor safety mechanism already in the system — motor disable requires explicit 0xFD command [1]:
+All layers call `disableAllMotors()` when the controller becomes unavailable. This sends the 0xFD disable command to all motors, using the same motor safety mechanism already in the system — motor disable requires explicit 0xFD command [1]:
 
 ```cpp
 void Legged::disableAllMotors() {
@@ -427,7 +486,7 @@ void Legged::controllerPeriodic() {
         return;
     }
 
-    // Layer 3: Producer lifecycle state
+    // Layer 3: Owner lifecycle state
     auto lifecycle = static_cast<ShmLifecycle>(
         m_shm->lifecycle_state.load(std::memory_order_acquire));
     if (lifecycle != ShmLifecycle::RUNNING) {
@@ -435,25 +494,32 @@ void Legged::controllerPeriodic() {
             lifecycle == ShmLifecycle::TERMINATED) {
             disableAllMotors();
         }
-        m_producerAlive = false;
+        m_controllerAlive = false;
         return;
     }
 
-    // Layer 4: Heartbeat watchdog
-    uint64_t heartbeat =
-        m_shm->producer_heartbeat_ns.load(std::memory_order_acquire);
+    // Layer 4a: Controller emergency stop
+    if (m_shm->controller_emergency_stop.load(std::memory_order_acquire)) {
+        disableAllMotors();
+        m_controllerAlive = false;
+        return;
+    }
+
+    // Layer 4b: Command staleness watchdog
+    uint32_t rb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+    uint64_t cmd_timestamp = m_shm->cmd_buffers[rb].timestamp_ns;
     uint64_t now = get_monotonic_ns();
 
-    if (heartbeat == 0 || (now - heartbeat) > HEARTBEAT_TIMEOUT_NS) {
+    if (cmd_timestamp == 0 || (now - cmd_timestamp) > CMD_STALENESS_TIMEOUT_NS) {
+        m_shm->emergency_stop.store(true, std::memory_order_release);
         disableAllMotors();
-        m_producerAlive = false;
+        m_controllerAlive = false;
         return;
     }
 
-    m_producerAlive = true;
+    m_controllerAlive = true;
 
     // All layers passed — safe to read commands
-    uint32_t rb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
     MercuryCommand cmd;
     std::memcpy(&cmd, &m_shm->cmd_buffers[rb], sizeof(MercuryCommand));
 
@@ -480,6 +546,6 @@ void Legged::controllerPeriodic() {
 |:-----:|-----------------|-----------|----------|-------|
 | **1** | Thread starts before SHM exists | Condition variable blocks thread until `start()` called | Thread waits — no crash | `ControlledSubsystemBase` constructor [1] |
 | **2** | SHM exists but not initialized | `magic != SHM_MAGIC` | Skip cycle, return | `controllerPeriodic()` every 5 ms [1] |
-| **3** | Producer shuts down gracefully | `lifecycle_state == SHUTTING_DOWN` | Disable motors (0xFD) [1], stop reading | `controllerPeriodic()` every 5 ms |
-| **4** | Producer crashes unexpectedly | `now - heartbeat > 200 ms` | Disable motors, flag `m_producerAlive = false` | `controllerPeriodic()` every 5 ms |
-| **5** | Producer restarts with new SHM | `m_producerAlive == false` in main loop | Detach, reattach (`fstat` + `mmap`), restart thread | `robotPeriodic()` every 20 ms [1] |
+| **3** | Owner (Robot) shuts down gracefully | `lifecycle_state == SHUTTING_DOWN` | Disable motors (0xFD) [1], stop reading | `controllerPeriodic()` every 5 ms |
+| **4** | Controller crashes or disconnects | `now - cmd_timestamp > 100 ms` or `controller_emergency_stop` | Set `emergency_stop`, disable motors, flag `m_controllerAlive = false` | `controllerPeriodic()` every 5 ms |
+| **5** | Controller reconnects to Robot's SHM | `m_controllerAlive == false` + fresh `cmd_timestamp` in main loop | Clear e-stop, restart subsystem thread | `robotPeriodic()` every 20 ms [1] |

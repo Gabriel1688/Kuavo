@@ -32,7 +32,7 @@ static constexpr int NUM_ACT_JOINT = 12;
 static constexpr int MOTORS_PER_GROUP = 6;
 static constexpr const char* SHM_NAME = "/mercury_robot_ipc";
 static constexpr uint32_t SHM_MAGIC = 0x4D455243; // "MERC"
-static constexpr uint32_t SHM_VERSION = 4;
+static constexpr uint32_t SHM_VERSION = 5;
 static constexpr uint64_t HEARTBEAT_STALE_NS = 100'000'000ULL;  // 100ms
 
 enum class ShmLifecycle : uint32_t {
@@ -325,7 +325,7 @@ struct SourceDoubleBuffer {
 };
 
 // ============================================================
-// Shared Memory Layout (between controller and actuator processes)
+// Shared Memory Layout (Robot owns, Mercury Controller consumes)
 // The SPSC ring buffer is NOT here — it is process-local
 // ============================================================
 
@@ -348,8 +348,8 @@ struct SharedMemoryLayout {
     std::atomic<uint32_t> cmd_write_idx{0};
     std::atomic<uint64_t> cmd_sequence{0};
 
-    std::atomic<uint64_t> controller_heartbeat_ns{0};
     std::atomic<bool> emergency_stop{false};
+    std::atomic<bool> controller_emergency_stop{false};
 
     uint16_t motor_can_ids[NUM_ACT_JOINT];
     uint32_t robot_id;
@@ -363,6 +363,8 @@ static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t),
               "atomic<uint64_t> must match uint64_t size for SHM compatibility");
 static_assert(alignof(std::atomic<uint64_t>) == alignof(uint64_t),
               "atomic<uint64_t> must match uint64_t alignment for SHM compatibility");
+static_assert(sizeof(std::atomic<bool>) == sizeof(bool),
+              "atomic<bool> must match bool size for SHM compatibility");
 static_assert(sizeof(SharedMemoryLayout) % 8 == 0,
               "SharedMemoryLayout must be 8-byte aligned for cross-platform compatibility");
 

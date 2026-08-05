@@ -1,10 +1,16 @@
 /**
  * @file mercury_controller.cpp
- * @brief Whole-body controller test — multi-source aware (v2 SHM layout)
+ * @brief Whole-body controller test — consumer mode (v5 SHM layout)
  *
- * Reads the composed SensorData (merged from 3 sources by the composer).
- * Detects per-source staleness independently.
- * Uses mercury_shm_v2.h — compatible with test_actuator_logger.
+ * The Kuavo Robot owns the SHM segment.  This controller attaches as a
+ * read-write consumer: it opens the existing segment (no O_CREAT), validates
+ * magic/version/lifecycle, writes Command buffers, and reads composed
+ * SensorData.
+ *
+ * If the Robot has not started yet (SHM does not exist), the controller
+ * retries every 100ms until the segment appears.  If the Robot shuts down
+ * (compose_timestamp_ns goes stale > 100ms), the controller detaches and
+ * re-enters the retry loop.
  *
  * Usage:
  *   ./mercury_controller [-freq 200] [-dur 10] [-joints 12]
@@ -20,6 +26,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 
@@ -30,43 +37,63 @@ static void signal_handler(int) { g_running = false; }
 
 class ControllerTestBench {
 public:
+    /**
+     * Attach to the Robot-owned SHM segment.  Polls shm_open(O_RDWR)
+     * every 100ms until the segment exists, then validates fstat size,
+     * magic, version, and lifecycle_state == RUNNING.
+     */
     bool init(uint32_t num_joints, uint32_t control_freq) {
         num_joints_ = num_joints;
         control_freq_ = control_freq;
         loop_period_ns_ = 1'000'000'000ULL / control_freq;
 
-        int fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-        if (fd < 0) { perror("shm_open"); return false; }
-        if (ftruncate(fd, sizeof(SharedMemoryLayout)) < 0) {
-            perror("ftruncate"); close(fd); return false;
+        printf("Controller v5 (consumer): waiting for Robot SHM segment '%s'...\n", SHM_NAME);
+
+        while (g_running) {
+            int fd = shm_open(SHM_NAME, O_RDWR, 0);
+            if (fd < 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            // Validate size
+            struct stat st;
+            if (fstat(fd, &st) < 0 || static_cast<size_t>(st.st_size) < sizeof(SharedMemoryLayout)) {
+                close(fd);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            void* ptr = mmap(nullptr, sizeof(SharedMemoryLayout),
+                             PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            close(fd);
+            if (ptr == MAP_FAILED) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            auto* candidate = static_cast<SharedMemoryLayout*>(ptr);
+
+            // Validate magic, version, lifecycle
+            uint32_t magic = candidate->magic.load(std::memory_order_acquire);
+            auto lifecycle = static_cast<ShmLifecycle>(
+                candidate->lifecycle_state.load(std::memory_order_acquire));
+
+            if (magic != SHM_MAGIC ||
+                candidate->version != SHM_VERSION ||
+                lifecycle != ShmLifecycle::RUNNING) {
+                munmap(ptr, sizeof(SharedMemoryLayout));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            layout_ = candidate;
+            break;
         }
-        void* ptr = mmap(nullptr, sizeof(SharedMemoryLayout),
-                         PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-        close(fd);
-        if (ptr == MAP_FAILED) { perror("mmap"); return false; }
 
-        layout_ = static_cast<SharedMemoryLayout*>(ptr);
+        if (!layout_) return false;  // g_running went false
 
-        // Initialize header (magic is written LAST as the release-acquire sentinel)
-        layout_->version = SHM_VERSION;  // v4 layout
-        layout_->num_joints = num_joints;
-        layout_->control_freq_hz = control_freq;
-        layout_->robot_id = 1;
-        layout_->emergency_stop.store(false, std::memory_order_relaxed);
-        layout_->controller_heartbeat_ns.store(get_monotonic_ns(), std::memory_order_relaxed);
-        layout_->lifecycle_state.store(
-            static_cast<uint32_t>(ShmLifecycle::RUNNING),
-            std::memory_order_release);
-        layout_->magic.store(SHM_MAGIC, std::memory_order_release);
-
-        std::memset(layout_->cmd_buffers, 0, sizeof(layout_->cmd_buffers));
-        std::memset(layout_->composed_buffers, 0, sizeof(layout_->composed_buffers));
-
-        for (uint32_t i = 0; i < num_joints; i++) {
-            layout_->motor_can_ids[i] = static_cast<uint16_t>(i + 1);
-        }
-
-        printf("Controller v2 initialized: %u joints @ %u Hz (multi-source v2)\n",
+        printf("Controller v5 attached: %u joints @ %u Hz (consumer mode)\n",
                num_joints, control_freq);
         printf("SHM layout size: %zu bytes\n", sizeof(SharedMemoryLayout));
         printf("  ImuStageData:        %zu bytes\n", sizeof(ImuStageData));
@@ -126,7 +153,6 @@ public:
             std::memcpy(&layout_->cmd_buffers[wb], &cmd, sizeof(Command));
             layout_->cmd_write_idx.store(wb, std::memory_order_release);
             layout_->cmd_sequence.fetch_add(1, std::memory_order_release);
-            layout_->controller_heartbeat_ns.store(write_start, std::memory_order_release);
             uint64_t write_end = get_monotonic_ns();
             write_stats_.record(write_end - write_start);
 
@@ -170,6 +196,18 @@ public:
             // ---- Compose latency (time between compose and read) ----
             if (sensor.compose_timestamp_ns > 0) {
                 compose_age_stats_.record(now - sensor.compose_timestamp_ns);
+
+                // Robot liveness: if composed data is stale > 100ms, the
+                // Robot has likely stopped.  Detach and re-enter init loop.
+                uint64_t compose_age = now - sensor.compose_timestamp_ns;
+                if (compose_age > HEARTBEAT_STALE_NS) {
+                    printf("  [WARN] Robot compose data stale (%.1f ms) — detaching and re-attaching.\n",
+                           compose_age / 1e6);
+                    munmap(layout_, sizeof(SharedMemoryLayout));
+                    layout_ = nullptr;
+                    // Re-attach in a retry loop
+                    if (!reattach()) return;
+                }
             }
 
             // ---- Sleep ----
@@ -247,19 +285,59 @@ public:
 
     ~ControllerTestBench() {
         if (layout_) {
-            layout_->lifecycle_state.store(
-                static_cast<uint32_t>(ShmLifecycle::SHUTTING_DOWN),
-                std::memory_order_release);
-            layout_->emergency_stop.store(true, std::memory_order_release);
-            layout_->lifecycle_state.store(
-                static_cast<uint32_t>(ShmLifecycle::TERMINATED),
-                std::memory_order_release);
             munmap(layout_, sizeof(SharedMemoryLayout));
         }
-        shm_unlink(SHM_NAME);
     }
 
 private:
+    /**
+     * Re-attach to the Robot SHM after a staleness-triggered detach.
+     * Returns true on success, false if g_running goes false.
+     */
+    bool reattach() {
+        printf("  Re-waiting for Robot SHM segment '%s'...\n", SHM_NAME);
+        while (g_running) {
+            int fd = shm_open(SHM_NAME, O_RDWR, 0);
+            if (fd < 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            struct stat st;
+            if (fstat(fd, &st) < 0 || static_cast<size_t>(st.st_size) < sizeof(SharedMemoryLayout)) {
+                close(fd);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            void* ptr = mmap(nullptr, sizeof(SharedMemoryLayout),
+                             PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            close(fd);
+            if (ptr == MAP_FAILED) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            auto* candidate = static_cast<SharedMemoryLayout*>(ptr);
+            uint32_t magic = candidate->magic.load(std::memory_order_acquire);
+            auto lifecycle = static_cast<ShmLifecycle>(
+                candidate->lifecycle_state.load(std::memory_order_acquire));
+
+            if (magic != SHM_MAGIC ||
+                candidate->version != SHM_VERSION ||
+                lifecycle != ShmLifecycle::RUNNING) {
+                munmap(ptr, sizeof(SharedMemoryLayout));
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            layout_ = candidate;
+            printf("  Re-attached to Robot SHM.\n");
+            return true;
+        }
+        return false;
+    }
+
     SharedMemoryLayout* layout_ = nullptr;
     uint32_t num_joints_ = NUM_ACT_JOINT;
     uint32_t control_freq_ = 1000;
@@ -293,9 +371,6 @@ int main(int argc, char* argv[]) {
 
     ControllerTestBench bench;
     if (!bench.init(joints, freq)) return 1;
-
-    printf("Waiting 2 seconds for actuator threads to attach...\n\n");
-    std::this_thread::sleep_for(std::chrono::seconds(2));
 
     bench.run(duration);
     return 0;

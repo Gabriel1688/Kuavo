@@ -43,27 +43,47 @@ void Robot::robotInit() {
     UdpServer::getInstance(0).setParamCache(&m_paramCache);
     UdpServer::getInstance(1).setParamCache(&m_paramCache);
 
-    // Attach to the producer's POSIX shared memory. The controller is managed
-    // by the mercury-controller systemd service; poll until the SHM appears
-    // instead of exiting immediately on startup.
-    constexpr uint64_t kAttachRetryMs = 100;
-    constexpr uint64_t kAttachTimeoutMs = 30'000;  // 30 seconds
-    uint64_t elapsedMs = 0;
-    m_shm = nullptr;
-    while (!m_shm && elapsedMs < kAttachTimeoutMs) {
-        m_shm = tryAttachSharedMemory();
-        if (!m_shm) {
-            SPDLOG_INFO("Waiting for controller service SHM ({} ms / {} ms)...",
-                        elapsedMs, kAttachTimeoutMs);
-            usleep(kAttachRetryMs * 1000);
-            elapsedMs += kAttachRetryMs;
-        }
-    }
-    if (!m_shm) {
-        SPDLOG_ERROR("Failed to attach to producer SHM after {} ms — exiting",
-                     kAttachTimeoutMs);
+    // Create and own the POSIX shared memory segment. The Robot is the sole
+    // owner — it creates, initializes, and unlinks the SHM. The Mercury
+    // Controller attaches as a consumer.
+    int fd = shm_open(mercury::SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (fd < 0) {
+        SPDLOG_ERROR("shm_open({}) failed: {}", mercury::SHM_NAME, strerror(errno));
         std::exit(EXIT_FAILURE);
     }
+    if (ftruncate(fd, sizeof(mercury::SharedMemoryLayout)) < 0) {
+        SPDLOG_ERROR("ftruncate({}) failed: {}", mercury::SHM_NAME, strerror(errno));
+        close(fd);
+        std::exit(EXIT_FAILURE);
+    }
+    void* ptr = mmap(nullptr, sizeof(mercury::SharedMemoryLayout),
+                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (ptr == MAP_FAILED) {
+        SPDLOG_ERROR("mmap({}) failed: {}", mercury::SHM_NAME, strerror(errno));
+        std::exit(EXIT_FAILURE);
+    }
+    m_shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
+
+    // Zero the entire layout, then initialize fields.
+    // magic is written LAST as the release-acquire sentinel.
+    std::memset(m_shm, 0, sizeof(mercury::SharedMemoryLayout));
+    m_shm->version = mercury::SHM_VERSION;
+    m_shm->num_joints = mercury::NUM_ACT_JOINT;
+    m_shm->control_freq_hz = 200;  // default controller freq
+    m_shm->robot_id = 1;
+    m_shm->emergency_stop.store(false, std::memory_order_relaxed);
+    m_shm->controller_emergency_stop.store(false, std::memory_order_relaxed);
+    for (uint32_t i = 0; i < mercury::NUM_ACT_JOINT; i++) {
+        m_shm->motor_can_ids[i] = static_cast<uint16_t>(i + 1);
+    }
+    m_shm->lifecycle_state.store(
+        static_cast<uint32_t>(mercury::ShmLifecycle::RUNNING),
+        std::memory_order_release);
+    m_shm->magic.store(mercury::SHM_MAGIC, std::memory_order_release);
+
+    SPDLOG_INFO("Created SHM {} ({}B) v{}", mercury::SHM_NAME,
+                sizeof(mercury::SharedMemoryLayout), mercury::SHM_VERSION);
     attachSharedMemory();
 
     // Helper no-op callback for async subsystem messages
@@ -136,10 +156,23 @@ void Robot::robotInit() {
     });
 }
 Robot::~Robot() {
+    // Signal shutdown to the Mercury Controller via lifecycle state.
+    if (m_shm) {
+        m_shm->lifecycle_state.store(
+            static_cast<uint32_t>(mercury::ShmLifecycle::SHUTTING_DOWN),
+            std::memory_order_release);
+    }
+
     // detachSharedMemory() stops all threads that touch SHM (IMU, legs),
-    // clears pointers, shuts down Logger & Composer, then munmaps.
+    // clears pointers, shuts down Logger & Composer, then munmaps and unlinks.
     // This must happen before member destructors run, otherwise leg threads
     // would still be accessing unmapped memory.
+    // Write TERMINATED just before detach (which does munmap + shm_unlink).
+    if (m_shm) {
+        m_shm->lifecycle_state.store(
+            static_cast<uint32_t>(mercury::ShmLifecycle::TERMINATED),
+            std::memory_order_release);
+    }
     detachSharedMemory();
 
     // Stop UDP server threads before Robot members (Legged, MotorParamCache)
@@ -176,35 +209,6 @@ void Robot::robotPeriodic() {
     // D4 Task 2: Button event polling
     m_loop.poll();
 
-    // IPC SHM lifecycle: check producer liveness and reattach if needed
-    if (m_shm) {
-        uint64_t now_ns = mercury::get_monotonic_ns();
-        uint32_t magic = m_shm->magic.load(std::memory_order_acquire);
-        auto lifecycle = static_cast<mercury::ShmLifecycle>(
-            m_shm->lifecycle_state.load(std::memory_order_acquire));
-        uint64_t heartbeat = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
-
-        if (magic != mercury::SHM_MAGIC ||
-            m_shm->version != mercury::SHM_VERSION ||
-            lifecycle != mercury::ShmLifecycle::RUNNING ||
-            heartbeat == 0 || heartbeat > now_ns ||
-            (now_ns - heartbeat) > mercury::HEARTBEAT_STALE_NS) {
-            SPDLOG_ERROR("Producer SHM lost — detaching and disabling subsystems");
-            leftLeg.setEnable(false);
-            rightLeg.setEnable(false);
-            detachSharedMemory();
-        }
-    }
-
-    if (!m_shm && (m_cycle % 10 == 0)) {
-        SPDLOG_INFO("Attempting SHM reattach (cycle={})", m_cycle);
-        m_shm = tryAttachSharedMemory();
-        if (m_shm) {
-            SPDLOG_INFO("Reconnected to producer SHM");
-            attachSharedMemory();
-        }
-    }
-
     // D4 Tasks 4-5: Health monitoring + safety validation via composed SHM buffer
     if (m_composer && m_shm) {
         // D5: Check per-source staleness via Composer bitmask
@@ -234,14 +238,24 @@ void Robot::robotPeriodic() {
             rightLeg.setEnable(false);
         }
 
-        // D5: Mercury Controller heartbeat check
-        uint64_t hb = m_shm->controller_heartbeat_ns.load(std::memory_order_acquire);
-        if (hb > 0) {
-            uint64_t now_ns = mercury::get_monotonic_ns();
-            if (hb > now_ns || (now_ns - hb) > mercury::HEARTBEAT_STALE_NS) {  // > 100ms stale
-                SPDLOG_ERROR("Mercury Controller heartbeat stale (>100ms) — emergency stop");
-                m_shm->emergency_stop.store(true, std::memory_order_release);
+        // Mercury Controller liveness: check command timestamp staleness.
+        // Skip if controller has never connected (timestamp_ns == 0).
+        uint32_t crb = m_shm->cmd_write_idx.load(std::memory_order_acquire);
+        if (crb <= 1) {
+            uint64_t cmd_ts = m_shm->cmd_buffers[crb].timestamp_ns;
+            if (cmd_ts > 0) {
+                uint64_t now_ns = mercury::get_monotonic_ns();
+                if (cmd_ts > now_ns || (now_ns - cmd_ts) > mercury::HEARTBEAT_STALE_NS) {
+                    SPDLOG_ERROR("Mercury Controller commands stale (>100ms) — emergency stop");
+                    m_shm->emergency_stop.store(true, std::memory_order_release);
+                }
             }
+        }
+
+        // Controller-initiated emergency stop propagation
+        if (m_shm->controller_emergency_stop.load(std::memory_order_acquire)) {
+            SPDLOG_ERROR("Controller-initiated emergency stop");
+            m_shm->emergency_stop.store(true, std::memory_order_release);
         }
     }
 
@@ -307,73 +321,6 @@ void Robot::updateStateCallback(std::string result) {
     //TODO:: consider what need to be done here.
 }
 
-mercury::SharedMemoryLayout* Robot::tryAttachSharedMemory() {
-    int fd = shm_open(mercury::SHM_NAME, O_RDWR, 0666);
-    if (fd < 0) {
-        SPDLOG_INFO("SHM {} not found: {}", mercury::SHM_NAME, strerror(errno));
-        return nullptr;
-    }
-
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        SPDLOG_WARN("SHM {} fstat failed: {}", mercury::SHM_NAME, strerror(errno));
-        close(fd);
-        return nullptr;
-    }
-
-    if (st.st_size < static_cast<off_t>(sizeof(mercury::SharedMemoryLayout))) {
-        SPDLOG_WARN("SHM {} too small: {} < {}", mercury::SHM_NAME, st.st_size, sizeof(mercury::SharedMemoryLayout));
-        close(fd);
-        return nullptr;
-    }
-
-    void* ptr = mmap(nullptr, sizeof(mercury::SharedMemoryLayout),
-                     PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (ptr == MAP_FAILED) {
-        SPDLOG_WARN("SHM {} mmap failed: {}", mercury::SHM_NAME, strerror(errno));
-        return nullptr;
-    }
-
-    auto* shm = static_cast<mercury::SharedMemoryLayout*>(ptr);
-
-    uint32_t magic = shm->magic.load(std::memory_order_acquire);
-    if (magic != mercury::SHM_MAGIC) {
-        SPDLOG_INFO("SHM {} invalid magic: 0x{:08X}", mercury::SHM_NAME, magic);
-        munmap(shm, sizeof(mercury::SharedMemoryLayout));
-        return nullptr;
-    }
-
-    if (shm->version != mercury::SHM_VERSION) {
-        SPDLOG_WARN("SHM {} version mismatch: expected {}, got {}",
-                     mercury::SHM_NAME, mercury::SHM_VERSION, shm->version);
-        munmap(shm, sizeof(mercury::SharedMemoryLayout));
-        return nullptr;
-    }
-
-    auto lifecycle = static_cast<mercury::ShmLifecycle>(
-        shm->lifecycle_state.load(std::memory_order_acquire));
-    if (lifecycle != mercury::ShmLifecycle::RUNNING) {
-        SPDLOG_INFO("SHM {} not RUNNING: {}", mercury::SHM_NAME,
-                     static_cast<uint32_t>(lifecycle));
-        munmap(shm, sizeof(mercury::SharedMemoryLayout));
-        return nullptr;
-    }
-
-    uint64_t now = mercury::get_monotonic_ns();
-    uint64_t heartbeat = shm->controller_heartbeat_ns.load(std::memory_order_acquire);
-    if (heartbeat == 0 || heartbeat > now || (now - heartbeat) > mercury::HEARTBEAT_STALE_NS) {
-        SPDLOG_INFO("SHM {} heartbeat stale ({} ms)", mercury::SHM_NAME,
-                     heartbeat > now ? 0 : (now - heartbeat) / 1'000'000ULL);
-        munmap(shm, sizeof(mercury::SharedMemoryLayout));
-        return nullptr;
-    }
-
-    SPDLOG_INFO("Attached to SHM {} ({}B) v{}", mercury::SHM_NAME,
-                sizeof(mercury::SharedMemoryLayout), shm->version);
-    return shm;
-}
-
 void Robot::detachSharedMemory() {
     if (!m_shm) return;
 
@@ -414,7 +361,9 @@ void Robot::detachSharedMemory() {
 
     // 5. Now safe to unmap — no threads hold references to shm_to_unmap.
     munmap(shm_to_unmap, sizeof(mercury::SharedMemoryLayout));
-    SPDLOG_INFO("SHM detached and unmapped");
+    // 6. Unlink the SHM — Robot is the owner.
+    shm_unlink(mercury::SHM_NAME);
+    SPDLOG_INFO("SHM detached, unmapped, and unlinked");
     m_imu_stale_counter = 0;
 }
 

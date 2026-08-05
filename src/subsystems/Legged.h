@@ -60,8 +60,7 @@ public:
     enum DisableReason {
         SHM_INVALID_MAGIC = 1,
         SHM_VERSION_MISMATCH,
-        SHM_LIFECYCLE_NOT_RUNNING,
-        HEARTBEAT_STALE,
+        CONTROLLER_EMERGENCY_STOP,
         EMERGENCY_STOP_ACTIVE,
         CMD_WRITE_IDX_INVALID
     };
