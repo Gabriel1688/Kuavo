@@ -1,0 +1,22 @@
+#!/bin/bash
+# Kuavo Robot service wrapper
+#
+# Usage:
+#   Kuavo
+#
+# Environment variables:
+#   KUAVO    path to the Robot binary (default: /usr/local/bin/Kuavo)
+#
+# The systemd unit file Kuavo.service installs this wrapper as
+# /usr/local/bin/Kuavo and starts it automatically at boot.
+
+set -e
+
+BIN="${KUAVO:-/usr/local/bin/Kuavo}"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: Kuavo binary not found or not executable: $BIN" >&2
+    exit 1
+fi
+
+exec "$BIN"

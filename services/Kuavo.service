@@ -1,0 +1,23 @@
+[Unit]
+Description=Kuavo Robot (SHM owner)
+Documentation=https://github.com/cognition-x/Kuavo/blob/main/services/Kuavo
+After=network.target
+
+[Service]
+Type=simple
+# The Robot binary path can be overridden via an Environment= line below
+# or by dropping a file into /etc/systemd/system/Kuavo.service.d/.
+Environment="KUAVO=/usr/local/bin/Kuavo"
+ExecStartPre=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
+ExecStart=/usr/local/bin/Kuavo
+ExecStopPost=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'
+Restart=on-failure
+RestartSec=2
+
+# The Robot creates and owns the POSIX shared memory segment.
+# SHM cleanup directives above handle stale segments from a previous crash.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

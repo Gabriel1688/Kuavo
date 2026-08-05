@@ -133,7 +133,26 @@ The controller opens the existing segment with `shm_open(O_RDWR)` (no `O_CREAT`)
 
 ### 2.2 Kuavo Robot systemd unit
 
-The Robot's systemd service should include SHM cleanup directives to handle stale segments from a previous crash:
+The Robot's systemd service owns the POSIX shared memory segment. It includes
+SHM cleanup directives to handle stale segments left by a previous crash.
+
+Install and enable the unit:
+
+```bash
+# Build and install the Robot binary
+sudo cp cmake-build-debug/Kuavo /usr/local/bin/
+sudo chmod +x /usr/local/bin/Kuavo
+sudo cp services/Kuavo /usr/local/bin/
+sudo chmod +x /usr/local/bin/Kuavo
+
+# Install the systemd unit file
+sudo cp services/Kuavo.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable Kuavo
+sudo systemctl start Kuavo
+```
+
+The unit file (`services/Kuavo.service`) contains the SHM cleanup directives:
 
 ```ini
 ExecStartPre=/bin/sh -c '/usr/bin/test -e /dev/shm/mercury_robot_ipc && /bin/rm -f /dev/shm/mercury_robot_ipc || true'

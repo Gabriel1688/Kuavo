@@ -1,7 +1,8 @@
 [Unit]
 Description=Mercury controller SHM consumer
 Documentation=https://github.com/cognition-x/Kuavo/blob/main/services/mercury-controller
-After=network.target
+After=network.target Kuavo.service
+BindsTo=Kuavo.service
 
 [Service]
 Type=simple
