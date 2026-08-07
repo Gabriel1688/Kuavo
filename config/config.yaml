@@ -23,12 +23,12 @@ mqtt:
 # --- UDP Network ---
 # TWO UDP server, one for left and one for right leg.
 udp:
-  server_ip: 127.0.0.1
+  server_ip: 0.0.0.0
   base_local_port: 8887       # localPort  = base_local_port  + server_id * 2
   base_remote_port: 8886      # remotePort = base_remote_port + server_id * 2
   client_ip:
-    left: 127.0.0.1           # hardware: 192.168.4.101
-    right: 127.0.0.1          # hardware: 192.168.4.103
+    left: 192.168.18.10           # hardware: 192.168.4.101
+    right: 192.168.18.10          # hardware: 192.168.4.103
 
 # --- IMU Interface ---
 imu:
@@ -70,7 +70,7 @@ motor:
 logger:
   path: "./logs/kuavo.log"
   level: debug
-  maxSize: 104857600
+  maxSize: 10485760
   rotation: 3
 
 data_logger:

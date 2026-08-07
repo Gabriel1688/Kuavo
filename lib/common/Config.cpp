@@ -5,8 +5,22 @@
 #include <stdexcept>
 
 #include "spdlog/spdlog.h"
+#include <sstream>
 
 namespace YAML = dynacore_YAML;
+namespace {
+
+  template <typename T>
+  std::string joinVec(const std::vector<T> &v, const std::string &sep = ", ") {
+          std::ostringstream oss;
+          for (size_t i = 0; i < v.size(); ++i) {
+                  if (i) oss << sep;
+                  oss << v[i];
+              }
+          return oss.str();
+      }
+
+}  // namespace
 
 // ---------- static state -----------------------------------------------------
 std::string Config::s_yamlPath;
@@ -187,8 +201,71 @@ void Config::load(const std::string &yamlPath) {
             }
         }
     }
-
+    dumpConfig();
     SPDLOG_INFO("Config loaded from {}", yamlPath);
+}
+
+// ---------- dump -------------------------------------------------------------
+void Config::dumpConfig() const {
+    SPDLOG_INFO("==== Loaded configuration ====");
+
+    SPDLOG_INFO("[MQTT]");
+    SPDLOG_INFO("  mode:        {}", m_mqtt.mode);
+    SPDLOG_INFO("  clientId:    {}", m_mqtt.clientId);
+    SPDLOG_INFO("  username:    {}", m_mqtt.username);
+    SPDLOG_INFO("  password:    {}", m_mqtt.password.empty() ? "<empty>" : "<redacted>");
+    SPDLOG_INFO("  address:     {}", m_mqtt.address);
+    SPDLOG_INFO("  broker:      {}", m_mqtt.broker);
+    SPDLOG_INFO("  host:        {}", m_mqtt.host);
+    SPDLOG_INFO("  port:        {}", m_mqtt.port);
+    SPDLOG_INFO("  mqttPort:    {}", m_mqtt.mqttPort);
+    SPDLOG_INFO("  inPort:      {}", m_mqtt.inPort);
+    SPDLOG_INFO("  outPort:     {}", m_mqtt.outPort);
+    SPDLOG_INFO("  qos:         {}", m_mqtt.qos);
+    SPDLOG_INFO("  robotId:     {}", m_mqtt.robotId);
+    SPDLOG_INFO("  topics:      [{}]", joinVec(m_mqtt.topics));
+
+    SPDLOG_INFO("[UDP]");
+    SPDLOG_INFO("  serverIp:       {}", m_udp.serverIp);
+    SPDLOG_INFO("  baseLocalPort:  {}", m_udp.baseLocalPort);
+    SPDLOG_INFO("  baseRemotePort: {}", m_udp.baseRemotePort);
+    SPDLOG_INFO("  clientIpLeft:   {}", m_udp.clientIpLeft);
+    SPDLOG_INFO("  clientIpRight:  {}", m_udp.clientIpRight);
+
+    SPDLOG_INFO("[IMU]");
+    SPDLOG_INFO("  serverIp:  {}", m_imu.serverIp);
+    SPDLOG_INFO("  localPort: {}", m_imu.localPort);
+    SPDLOG_INFO("  type:      {}", m_imu.type == ImuType::FLOAT ? "float" : "int");
+    SPDLOG_INFO("  baseId:    {:#x}", m_imu.baseId);
+
+    SPDLOG_INFO("[Motor]");
+    SPDLOG_INFO("  observerIp:   {}", m_motor.observerIp);
+    SPDLOG_INFO("  maxCanDevice: {}", m_motor.maxCanDevice);
+    SPDLOG_INFO("  motorsPerLeg: {}", m_motor.motorsPerLeg);
+    for (const auto &t : m_motor.types) {
+         SPDLOG_INFO("  type '{}': id={}, positionMax={}, velocityMax={}, torqueMax={}",
+                     t.name, t.id, t.positionMax, t.velocityMax, t.torqueMax);
+    }
+    for (const auto &l : m_motor.legs) {
+         SPDLOG_INFO("  leg '{}': baseId={}, serverId={}, motorType='{}', deviceIds=[{}]",
+                     l.name, l.baseId, l.serverId, l.motorType, joinVec(l.deviceIds));
+    }
+
+    SPDLOG_INFO("[Logger]");
+    SPDLOG_INFO("  path:     {}", m_logger.path);
+    SPDLOG_INFO("  level:    {}", m_logger.level);
+    SPDLOG_INFO("  maxSize:  {}", m_logger.maxSize);
+    SPDLOG_INFO("  rotation: {}", m_logger.rotation);
+    SPDLOG_INFO("[DataLogger]");
+    SPDLOG_INFO("  enabled:            {}", m_dataLogger.enabled);
+    SPDLOG_INFO("  downsampleEvery:    {}", m_dataLogger.downsampleEvery);
+    SPDLOG_INFO("  ringBufferCapacity: {}", m_dataLogger.ringBufferCapacity);
+
+    SPDLOG_INFO("[DriverStation]");
+    SPDLOG_INFO("  udpPort: {}", m_driverStation.udpPort);
+    for (const auto &kv : m_driverStation.buttons) {
+          SPDLOG_INFO("  button '{}': '{}'", kv.first, kv.second);
+    }
 }
 
 // ---------- finders ----------------------------------------------------------
