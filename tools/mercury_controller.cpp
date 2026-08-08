@@ -350,7 +350,7 @@ private:
 
 int main(int argc, char* argv[]) {
     uint32_t freq = 200;
-    double duration = 10.0;
+    double duration = 0.0;
     uint32_t joints = NUM_ACT_JOINT;
 
     for (int i = 1; i < argc; i++) {

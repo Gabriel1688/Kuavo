@@ -229,7 +229,7 @@ public:
         memset(&clientAddr, 0, sizeof(clientAddr));
         clientAddr.sin_family = AF_INET;
         clientAddr.sin_port = htons(localPort_);
-        clientAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        clientAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (bind(sockfd_, (struct sockaddr*)&clientAddr, sizeof(clientAddr)) < 0) {
             std::cerr << "Error binding to port " << localPort_ << std::endl;
@@ -240,8 +240,8 @@ public:
         memset(&remoteAddr_, 0, sizeof(remoteAddr_));
         remoteAddr_.sin_family = AF_INET;
         remoteAddr_.sin_port = htons(remotePort_);
-        remoteAddr_.sin_addr.s_addr = inet_addr("127.0.0.1");
-        SPDLOG_INFO("Multi-motor simulator initialized: motors=[{}] local=[{}] remote=[{}]", motors_.size(), localPort_, remotePort_);
+        remoteAddr_.sin_addr.s_addr = inet_addr("192.168.18.22");
+        SPDLOG_INFO("Multi-motor simulator initialized: motors=[{}] local=[{}] remote=[{},{}]", motors_.size(), localPort_, "192.168.18.22", remotePort_);
         return true;
     }
 
@@ -249,6 +249,18 @@ public:
     // Motor Mode — epoll command-response [1]
     // ========================================================
     void runMotorMode() {
+
+        sched_param sch_params;
+        // Real-time priorities typically range from 1 (lowest) to 99 (highest)
+        sch_params.sched_priority = 90;
+
+        // 3. Extract the raw POSIX handle and apply the configurations
+        int result = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sch_params);
+        if (result != 0) {
+            SPDLOG_ERROR("pthread_setschedparam failed");
+        }else {
+            SPDLOG_INFO("pthread_setschedparam success");
+        }
         int epfd = epoll_create(2);
         struct epoll_event ev;
         ev.data.fd = sockfd_;
@@ -279,7 +291,7 @@ public:
                         break;
                     }
 
-                    printFrame("-->", msg, CAN_FRAME_SIZE);
+                    //printFrame("-->", msg, CAN_FRAME_SIZE);
                     handleCommand(msg, static_cast<size_t>(numBytes));
                 }
             }
@@ -584,8 +596,8 @@ private:
         out << std::fixed << std::setprecision(6)
             << ", " << op << " RID=" << static_cast<int>(rid)
             << " val=" << trunc6(value);
-        SPDLOG_INFO("{}", out.str());
-        std::cout << out.str() << std::endl;
+        //SPDLOG_INFO("{}", out.str());
+        //std::cout << out.str() << std::endl;
 
         // Build response [3]
         std::array<uint8_t, CAN_FRAME_SIZE> resp = {};
@@ -603,7 +615,7 @@ private:
             std::memcpy(&resp[9], &value, 4);
         }
 
-        printFrame("<--", resp.data(), CAN_FRAME_SIZE);
+        //printFrame("<--", resp.data(), CAN_FRAME_SIZE);
         sendResponse(resp.data(), CAN_FRAME_SIZE);
     }
 
@@ -680,7 +692,7 @@ private:
     void sendFeedback(const MotorState& motor) {
         std::array<uint8_t, CAN_FRAME_SIZE> frame;
         buildFeedbackFrame(motor, frame);
-        printFrame("<--", frame.data(), CAN_FRAME_SIZE);
+        //printFrame("<--", frame.data(), CAN_FRAME_SIZE);
         sendResponse(frame.data(), CAN_FRAME_SIZE);
     }
 
@@ -834,12 +846,19 @@ void setupLogger(const std::string& logFile) {
         }
     }
 
-    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logFile, 100 * 1024, 3);
+    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(logFile, 1000 * 1024, 3);
     auto logger = std::make_shared<spdlog::logger>("multi_sink", spdlog::sinks_init_list{console_sink, file_sink});
     console_sink->set_level(spdlog::level::debug);
     file_sink->set_level(spdlog::level::debug);
     logger->set_level(spdlog::level::debug);
-    logger->flush_on(spdlog::level::debug);
+    // flush_on(err) instead of flush_on(debug): at 400Hz × 6 motors the
+    // simulator produces ~7200 log lines/sec.  Synchronous flushing on
+    // every line causes the single epoll thread to block on disk I/O,
+    // making it fall behind the incoming packet rate and stretching
+    // observed timestamps (e.g. a 120ms enable→disable interval on the
+    // Kuavo side appeared as 562ms in the simulator log).
+    logger->flush_on(spdlog::level::err);
+
     console_sink->set_pattern(pattern);
     file_sink->set_pattern(pattern);
     spdlog::set_default_logger(logger);

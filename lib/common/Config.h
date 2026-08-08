@@ -116,7 +116,7 @@ public:
 private:
     Config() = default;
     void load(const std::string &yamlPath);
-
+    void dumpConfig() const;
     Mqtt m_mqtt;
     Udp m_udp;
     Imu m_imu;
