@@ -364,3 +364,246 @@ If your joystick axes represent velocity, integrate them over time before sendin
 - `MercuryShmInterface` proactive thread — can be merged into main loop (Section 6).
 
 Reducing these threads lowers context-switch and scheduling pressure on the control host, which is the main goal of the RT-priority starvation investigation.
+
+## 11. Memory / CPU Optimization
+
+The remote VM currently shows ~70% CPU usage while memory stays below 10%. In the Kuavo/Mercury stack that pattern almost always means the CPU is being spent on **logging, formatting, flushing, and libwebsockets/MQTT IO**, not on the core control math. The fixed-size working set (SHM, ring buffers, MQTT queues) is only a few MB, which is why RSS is low.
+
+### 11.1 First: identify the real CPU consumer on the remote VM
+
+Run these for 30 s while the robot is enabled:
+
+```bash
+# Per-thread CPU of the two main processes
+top -H -p $(pgrep -d',' -f 'kuavo|mercury_service')
+
+# If available, see which functions are hot
+sudo perf top -p $(pgrep -f mercury_service)
+sudo perf top -p $(pgrep -f Robot|head -1)
+```
+
+If `spdlog`, `fmt`, or file-sink functions are near the top, the fixes below will give the biggest drop. If `RBDL`, `qpOASES`, or `MassMatrix` are hot, the controller math is the bottleneck.
+
+### 11.2 Immediate CPU wins
+
+#### 11.2.1 Turn down logging / flushing
+
+`config/config.yaml` currently sets:
+
+```yaml
+logger:
+  level: debug
+```
+
+And `src/Robot.cpp:432-446` (`setupLogger`) does:
+
+```cpp
+if (cfg.level == "debug") {
+    console_sink->set_level(spdlog::level::debug);
+    file_sink->set_level(spdlog::level::debug);
+    logger->set_level(spdlog::level::debug);
+    logger->flush_on(spdlog::level::debug);   // <-- flushes disk on every log
+}
+```
+
+With `debug`, `SPDLOG_DEBUG` in:
+- `src/subsystems/Legged.cpp:193` (400 Hz × 2 legs)
+- `src/Robot.cpp:302` (100 Hz)
+
+is formatted and flushed to the rotating file **every cycle**. That alone can eat a large fraction of a core.
+
+**Do this first:**
+
+```yaml
+logger:
+  level: info        # or warn
+  maxSize: 104857600
+  rotation: 3
+```
+
+And remove/comment the unconditional `flush_on` in `Robot.cpp`:
+
+```cpp
+// logger->flush_on(spdlog::level::debug);
+// Better: flush only on errors
+logger->flush_on(spdlog::level::err);
+```
+
+If you still need debug logs, use `SPDLOG_TRACE` for the 400 Hz timing path and compile with `SPDLOG_ACTIVE_LEVEL` or set the runtime level to `info`.
+
+#### 11.2.2 Use an async `spdlog` sink
+
+Sync `spdlog` holds a mutex and does file/console I/O. Any RT thread that calls `SPDLOG_*` can be blocked by the OS/disk. Switch to async mode with an overwrite policy so RT threads never wait:
+
+```cpp
+#include "spdlog/async.h"
+#include "spdlog/sinks/rotating_file_sink.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+
+void setupLogger() {
+    const auto &cfg = Config::instance().logger();
+    auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+        cfg.path, cfg.maxSize, cfg.rotation);
+
+    auto tp = spdlog::init_thread_pool(8192, 1);   // bounded queue, 1 logger thread
+    auto logger = std::make_shared<spdlog::async_logger>(
+        "async", spdlog::sinks_init_list{console_sink, file_sink},
+        tp, spdlog::async_overflow_policy::overrun_oldest);
+    logger->set_level(spdlog::level::from_str(cfg.level));
+    logger->flush_on(spdlog::level::err);
+    spdlog::set_default_logger(logger);
+}
+```
+
+#### 11.2.3 Reduce `libwebsockets` log verbosity
+
+`lib/mqtt/MqttClient.cpp:149` sets:
+
+```cpp
+lws_set_log_level(LLL_USER | LLL_ERR | LLL_WARN, lws_spdlog_emit);
+```
+
+`LLL_USER` can be noisy. In production:
+
+```cpp
+lws_set_log_level(LLL_ERR, lws_spdlog_emit);   // or 0
+```
+
+#### 11.2.4 Disable or downsample the MQTT data logger
+
+`src/Robot.cpp:405-408` starts the logger whenever `globalMqtt` exists. It does **not** check `data_logger.enabled` from `config/config.yaml`:
+
+```yaml
+data_logger:
+  enabled: true
+  downsample_every: 5
+```
+
+If you do not need `robot/sensor/bin` telemetry, make `attachSharedMemory` respect that flag:
+
+```cpp
+const auto& dl = Config::instance().dataLogger();
+if (dl.enabled && globalMqtt) {
+    m_logger = std::make_unique<mercury::Logger>(m_logRing, *globalMqtt,
+        static_cast<uint32_t>(Config::instance().mqtt().robotId),
+        static_cast<size_t>(dl.downsampleEvery));
+    m_logger->start();
+}
+```
+
+If you need telemetry, increase `downsample_every` (e.g., `20` or `50`) to reduce MQTT publish rate and `libwebsockets` work.
+
+#### 11.2.5 Remove telemetry-heavy threads from `mercury_service`
+
+From the thread analysis above, the controller also runs:
+- `DataManager` (UDP telemetry at 200 Hz, redundant with SHM)
+- `ExtCtrlReceiver` (UDP setpoint, only needed for teleop)
+- `MercuryShmInterface` proactive thread (can be merged into the main loop)
+
+Disabling `DataManager` alone is often a 5–15% CPU saving on a small core count.
+
+#### 11.2.6 `MqttClient` polling loop
+
+`lib/mqtt/MqttClient.cpp:158-168` uses `lws_service(m_context, 0)` and then `sleep_for(1 ms)`. The 1 ms floor is already a guard against 100% CPU, but if `lws` is reconnecting frequently the loop still wakes every ms. If joystick latency is not critical, you can sleep longer when the queue is empty:
+
+```cpp
+std::this_thread::sleep_for(std::chrono::milliseconds(
+    m_binaryMessages.empty() ? 5 : 1));
+```
+
+If low latency is required, keep 1 ms and instead fix logging/LWS verbosity (above).
+
+### 11.3 Memory usage / allocation churn
+
+RSS is low (<10%) because the fixed working set is small. The bigger issue is **allocation churn**, which also shows up as CPU spikes and latency jitter.
+
+#### 11.3.1 Avoid per-publish allocations in `Logger` + `MqttClient`
+
+`lib/logger/Logger.cpp:130-145` allocates a new `std::vector<uint8_t>` every publish:
+
+```cpp
+std::vector<uint8_t> Logger::serializeBatch(const BatchLogRecord& batch) {
+    size_t total = ...;
+    std::vector<uint8_t> buf(total);
+    ...
+    return buf;
+}
+```
+
+Then `lib/mqtt/MqttClient.cpp:292` copies it again into `BinaryMessage`:
+
+```cpp
+m_binaryMessages.emplace(topic, std::vector<uint8_t>(data, data + len), qos, retain);
+```
+
+**Better:** move the payload instead of copying. Add an rvalue overload:
+
+```cpp
+// MqttClient.h
+bool publish_binary(const char* topic, std::vector<uint8_t>&& payload, int qos, bool retain = false);
+
+// MqttClient.cpp
+bool MqttClient::publish_binary(const char* topic, std::vector<uint8_t>&& payload, int qos, bool retain) {
+    ...
+    m_binaryMessages.emplace(topic, std::move(payload), qos, retain);
+    ...
+}
+```
+
+Then `Logger.cpp` can serialize into a `thread_local` buffer and move it:
+
+```cpp
+thread_local std::vector<uint8_t> s_payload;
+s_payload.clear();
+s_payload.resize(total);
+// memcpy into s_payload.data()
+if (!mqtt_.publish_binary(MQTT_TOPIC_SENSOR, std::move(s_payload), 0, false)) {
+    // dropped
+}
+```
+
+This eliminates two heap allocations per publish.
+
+#### 11.3.2 Shrink unbounded queues if memory ever becomes tight
+
+`MqttClient` queue high-water is 1000 (`lib/mqtt/MqttClient.cpp:203`). With ~4–6 KB payloads that can peak at several MB. If you want a smaller footprint:
+
+```cpp
+size_t m_highWater = 128;   // or 64
+size_t m_lowWater  = 64;    // half of highWater
+```
+
+The SPSC ring buffers are also larger than necessary because the logger drains at 1 kHz:
+
+- `include/mercury_shm.h:266` — `LOG_RING_CAPACITY = 256`
+- `lib/composer/Composer.h:28` — `BATCH_RING_CAPACITY = 256`
+
+Each `BatchLogRecord` is roughly `4 × (SensorData + Command)` ≈ **5–6 KB**. A capacity of `256` is ~1.5 MB per ring. If memory is a concern, `64` is plenty at 1 kHz drain rate.
+
+#### 11.3.3 Trade memory for CPU (if you have headroom)
+
+If “memory usage only 10%” means you have free RAM and want to use it to lower CPU, you can:
+- Pre-allocate larger fixed buffers in `Logger` and `MqttClient` to avoid repeated `malloc`.
+- Cache the RBDL `MassMatrix` / `Coriolis` if the controller recomputes them every cycle and the configuration changes slowly.
+- Increase SHM double-buffer counts (if the controller reads at a much lower rate than the robot writes) to reduce lock contention.
+
+#### 11.4 If the controller itself (`mercury_service`) is the 70% CPU user
+
+If `perf top` shows the controller process hot, apply the controller-specific parts from Sections 6 and 10:
+
+- Disable `DataManager` telemetry.
+- Remove the `MercuryShmInterface` proactive thread and write commands directly from the main loop.
+- Run with `SCHED_FIFO` priority 85 and pin to one core:
+  ```bash
+  sudo chrt -f 85 taskset -c 3 ./mercury_service
+  ```
+- If the WBC/QP solver is the bottleneck, lower the controller frequency from 200 Hz to 100 Hz (the leg threads still run at 400 Hz and will repeat the last command; the 100 ms stale threshold in `mercury_shm.h` tolerates this).
+
+#### 11.5 Suggested order of changes
+
+1. `config.yaml`: `logger.level: info` (or `warn`) and `logger->flush_on(err)`.
+2. Set `lws_set_log_level(LLL_ERR, ...)` or `0`.
+3. Make `Robot.cpp` respect `data_logger.enabled`.
+4. If telemetry not needed, set `data_logger.enabled: false`.
+5. Re-run `perf top`. If CPU is still high, profile `mercury_service` and apply controller thread reductions from Sections 6 and 10.

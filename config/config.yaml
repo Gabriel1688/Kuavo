@@ -27,8 +27,8 @@ udp:
   base_local_port: 8887       # localPort  = base_local_port  + server_id * 2
   base_remote_port: 8886      # remotePort = base_remote_port + server_id * 2
   client_ip:
-    left: 192.168.18.10           # hardware: 192.168.4.101
-    right: 192.168.18.10          # hardware: 192.168.4.103
+    left: 127.0.0.1           # hardware: 192.168.4.101
+    right: 127.0.0.1          # hardware: 192.168.4.103
 
 # --- IMU Interface ---
 imu:

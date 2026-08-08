@@ -371,7 +371,7 @@ void MqttClient::onClientWriteAble(struct lws *wsi, struct pss *pss) {
             m_pubParam.payload = msg.payload.data();
             m_pubParam.payload_len = static_cast<uint32_t>(msg.payload.size());
             m_pubParam.payload_pos = 0;
-            SPDLOG_INFO("Publish topic [{}], qos [{}], retain [{}], len [{}]",
+            SPDLOG_TRACE("Publish topic [{}], qos [{}], retain [{}], len [{}]",
                         m_pubParam.topic, msg.qos, msg.retain, m_pubParam.payload_len);
             if (lws_mqtt_client_send_publish(wsi, &m_pubParam,
                                              msg.payload.data(),
@@ -421,11 +421,11 @@ int MqttClient::callback(struct lws *wsi, enum lws_callback_reasons reason, void
         break;
 
     case LWS_CALLBACK_MQTT_CLIENT_WRITEABLE:
-        SPDLOG_INFO("MQTT_CLIENT_WRITEABLE, pss->state={}", pss->state);
+        SPDLOG_TRACE("MQTT_CLIENT_WRITEABLE, pss->state={}", pss->state);
         onClientWriteAble(wsi, pss);
         break;
     case LWS_CALLBACK_MQTT_ACK:
-        SPDLOG_INFO("MQTT_ACK");
+        SPDLOG_TRACE("MQTT_ACK");
         if (pss->state == STATE_PUBLISH_QOS0) {
             std::lock_guard<std::mutex> lock(m_mqttMutex);
             if (!m_binaryMessages.empty()) {

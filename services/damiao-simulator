@@ -13,6 +13,8 @@
 #                          (default: 8886)
 #   DAMIAO_SIMULATOR_REMOTE remote UDP port to send feedback to
 #                          (default: 8887)
+#   DAMIAO_SIMULATOR_IP    remote IP address to send feedback to
+#                          (default: 127.0.0.1)
 #   DAMIAO_SIMULATOR_LOG   log file path
 #                          (default: ../logs/damiao_simulator.log)
 #
@@ -25,6 +27,7 @@ BIN="${DAMIAO_SIMULATOR:-/usr/local/bin/DamiaoSimulator}"
 IDS="${DAMIAO_SIMULATOR_IDS:-1,2,3,4,5,6}"
 LOCAL="${DAMIAO_SIMULATOR_LOCAL:-8886}"
 REMOTE="${DAMIAO_SIMULATOR_REMOTE:-8887}"
+IP="${DAMIAO_SIMULATOR_IP:-127.0.0.1}"
 LOG="${DAMIAO_SIMULATOR_LOG:-../logs/damiao_simulator.log}"
 
 if [ ! -x "$BIN" ]; then
@@ -32,4 +35,4 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-exec "$BIN" -ids "$IDS" -local "$LOCAL" -remote "$REMOTE" -log "$LOG"
+exec "$BIN" -ids "$IDS" -local "$LOCAL" -remote "$REMOTE" -ip "$IP" -log "$LOG"

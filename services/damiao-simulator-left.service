@@ -12,6 +12,7 @@ Environment="DAMIAO_SIMULATOR=/usr/local/bin/DamiaoSimulator"
 Environment="DAMIAO_SIMULATOR_IDS=1,2,3,4,5,6"
 Environment="DAMIAO_SIMULATOR_LOCAL=8886"
 Environment="DAMIAO_SIMULATOR_REMOTE=8887"
+Environment="DAMIAO_SIMULATOR_IP=127.0.0.1"
 Environment="DAMIAO_SIMULATOR_LOG=/var/log/kuavo/damiao-simulator-left.log"
 ExecStart=/usr/local/bin/damiao-simulator
 Restart=on-failure

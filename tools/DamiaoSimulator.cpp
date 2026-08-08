@@ -22,6 +22,9 @@
  *
  *   # Per-instance log file (required when running multiple simulators on the same host)
  *   ./damiao_multi_simulator -ids 1,2,3 -log /var/log/kuavo/damiao-simulator-left.log
+ *
+ *   # Remote controller host
+ *   ./damiao_multi_simulator -ids 1,2,3 -ip 192.168.1.10 -local 8886 -remote 8887
  */
 
 #include <arpa/inet.h>
@@ -29,11 +32,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <errno.h>
 #include <fcntl.h>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sstream>
 #include <string>
 #include <sys/epoll.h>
@@ -51,6 +57,22 @@ using namespace std::chrono_literals;
 void setupLogger(const std::string& logFile);
 static constexpr size_t MAX_MOTORS = 12;
 static constexpr size_t CAN_FRAME_SIZE = 13;
+
+// ============================================================
+// Scheduling helpers
+// ============================================================
+static bool setCurrentThreadFifo(int priority) {
+    struct sched_param param{};
+    param.sched_priority = priority;
+    int ret = pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+    if (ret != 0) {
+        SPDLOG_WARN("Failed to set SCHED_FIFO/{} for DamiaoSimulator thread: {}",
+                    priority, strerror(ret));
+        return false;
+    }
+    SPDLOG_INFO("DamiaoSimulator thread running with SCHED_FIFO/{}", priority);
+    return true;
+}
 
 // ============================================================
 // Motor Error/Status Codes [2]
@@ -185,8 +207,9 @@ enum class CommandType {
 class DamiaoMultiSimulator {
 public:
     DamiaoMultiSimulator(int localPort, int remotePort,
+                         const std::string& remoteIp,
                          const std::vector<uint16_t>& motorIds)
-        : localPort_(localPort), remotePort_(remotePort) {
+        : localPort_(localPort), remotePort_(remotePort), remoteIp_(remoteIp) {
 
         if (motorIds.size() > MAX_MOTORS) {
             std::cerr << "Error: max " << MAX_MOTORS
@@ -217,6 +240,14 @@ public:
     // Socket Initialization [1]
     // ========================================================
     bool init() {
+        memset(&remoteAddr_, 0, sizeof(remoteAddr_));
+        remoteAddr_.sin_family = AF_INET;
+        remoteAddr_.sin_port = htons(remotePort_);
+        if (inet_pton(AF_INET, remoteIp_.c_str(), &remoteAddr_.sin_addr) != 1) {
+            std::cerr << "Error: invalid remote IP address: " << remoteIp_ << std::endl;
+            return false;
+        }
+
         sockfd_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (sockfd_ < 0) {
             std::cerr << "Error creating socket" << std::endl;
@@ -237,11 +268,7 @@ public:
             return false;
         }
 
-        memset(&remoteAddr_, 0, sizeof(remoteAddr_));
-        remoteAddr_.sin_family = AF_INET;
-        remoteAddr_.sin_port = htons(remotePort_);
-        remoteAddr_.sin_addr.s_addr = inet_addr("192.168.18.22");
-        SPDLOG_INFO("Multi-motor simulator initialized: motors=[{}] local=[{}] remote=[{},{}]", motors_.size(), localPort_, "192.168.18.22", remotePort_);
+        SPDLOG_INFO("Multi-motor simulator initialized: motors=[{}] local=[{}] remote=[{},{}]", motors_.size(), localPort_, remoteIp_, remotePort_);
         return true;
     }
 
@@ -249,18 +276,7 @@ public:
     // Motor Mode — epoll command-response [1]
     // ========================================================
     void runMotorMode() {
-
-        sched_param sch_params;
-        // Real-time priorities typically range from 1 (lowest) to 99 (highest)
-        sch_params.sched_priority = 90;
-
-        // 3. Extract the raw POSIX handle and apply the configurations
-        int result = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sch_params);
-        if (result != 0) {
-            SPDLOG_ERROR("pthread_setschedparam failed");
-        }else {
-            SPDLOG_INFO("pthread_setschedparam success");
-        }
+        setCurrentThreadFifo(90);
         int epfd = epoll_create(2);
         struct epoll_event ev;
         ev.data.fd = sockfd_;
@@ -305,6 +321,7 @@ private:
     int sockfd_ = -1;
     int localPort_;
     int remotePort_;
+    std::string remoteIp_;
     struct sockaddr_in remoteAddr_;
 
     // Motor instances keyed by CAN ID
@@ -750,6 +767,7 @@ static void printUsage(const char* prog) {
               << " [-mode motor|imu]"
               << " [-local port]"
               << " [-remote port]"
+              << " [-ip remote_ip]"
               << " [-ids id1,id2,...,id6]"
               << " [-log log_file]"
               << "\n\nExamples:\n"
@@ -757,7 +775,9 @@ static void printUsage(const char* prog) {
               << "  " << prog << " -ids 1,2,3,4,5,6\n"
               << "  " << prog << " -ids 0x01,0x02,0x03 -mode imu\n"
               << "  " << prog << " -ids 1,2,3 -local 8886 -remote 8887\n"
-              << "  " << prog << " -ids 1,2,3 -local 8886 -remote 8887 -log /var/log/kuavo/left.log\n"
+              << "  " << prog << " -ids 1,2,3 -local 8886 -remote 8887 -ip 192.168.1.10\n"
+              << "  " << prog << " -ids 1,2,3,4,5,6 -local 8886 -remote 8887 -log ../logs/kuavo/left.log\n"
+              << "  " << prog << " -ids 7,8,9,10,11,12 -local 8888 -remote 8889 -log ../logs/kuavo/right.log\n"
               << std::endl;
 }
 
@@ -768,6 +788,7 @@ static void printUsage(const char* prog) {
 int main(int argc, char* argv[]) {
     int localPort        = 8886;   // [1]
     int remotePort       = 8887;   // [1]
+    std::string remoteIp = "127.0.0.1"; // Default: localhost
     std::string idString = "1";    // Default: single motor with ID 1
     std::string logFile  = "../logs/damiao_simulator.log"; // Default log path
 
@@ -796,6 +817,8 @@ int main(int argc, char* argv[]) {
                 SPDLOG_ERROR("invalid remote port {}", remotePort);
                 return 1;
             }
+        } else if (strcmp(argv[i], "-ip") == 0 && i + 1 < argc) {
+            remoteIp = argv[++i];
         } else if (strcmp(argv[i], "-ids") == 0 && i + 1 < argc) {
             idString = argv[++i];
         } else if (strcmp(argv[i], "-log") == 0 && i + 1 < argc) {
@@ -822,7 +845,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    DamiaoMultiSimulator sim(localPort, remotePort, motorIds);
+    DamiaoMultiSimulator sim(localPort, remotePort, remoteIp, motorIds);
 
     if (!sim.init()) return 1;
 

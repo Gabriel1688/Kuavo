@@ -320,12 +320,12 @@ sudo systemctl enable --now damiao-simulator-right
 
 The wrapper reads the environment variables from each unit file and passes them to `DamiaoSimulator`:
 
-| Service | Motor IDs | Local port | Remote port | Log file | Simulated leg |
-|---|---|---|---|---|---|
-| `damiao-simulator-left` | `1,2,3,4,5,6` | `8886` | `8887` | `/var/log/kuavo/damiao-simulator-left.log` | Left |
-| `damiao-simulator-right` | `7,8,9,10,11,12` | `8888` | `8889` | `/var/log/kuavo/damiao-simulator-right.log` | Right |
+| Service | Motor IDs | Local port | Remote port | Remote IP | Log file | Simulated leg |
+|---|---|---|---|---|---|---|
+| `damiao-simulator-left` | `1,2,3,4,5,6` | `8886` | `8887` | `127.0.0.1` | `/var/log/kuavo/damiao-simulator-left.log` | Left |
+| `damiao-simulator-right` | `7,8,9,10,11,12` | `8888` | `8889` | `127.0.0.1` | `/var/log/kuavo/damiao-simulator-right.log` | Right |
 
-To override the log file for one service, edit the unit or use `sudo systemctl edit` to set a different `DAMIAO_SIMULATOR_LOG` value. The simulator will create the parent directory if it does not already exist.
+To override the log file or remote IP for one service, edit the unit or use `sudo systemctl edit` to set a different `DAMIAO_SIMULATOR_LOG` or `DAMIAO_SIMULATOR_IP` value. The simulator will create the parent directory if it does not already exist.
 
 ### 4.3 Manage the simulators
 
